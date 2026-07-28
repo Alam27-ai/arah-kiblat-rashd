@@ -599,6 +599,7 @@ def _lat(s: str) -> str:
 def build_pdf(inp, a_k, sol) -> bytes:
     """Laporan PDF polos berisi data, hasil, gambar simulasi, langkah, sumber."""
     from fpdf import FPDF
+    from fpdf.enums import XPos, YPos
 
     session_key, delta_a, a_s = sol.session, sol.delta_a, sol.sun_azimuth
     sesi = "Pagi" if session_key == "pagi" else "Sore"
@@ -617,10 +618,10 @@ def build_pdf(inp, a_k, sol) -> bytes:
     pdf.add_page()
 
     pdf.set_font("Helvetica", "B", 15)
-    pdf.cell(0, 9, _lat("LAPORAN PENENTUAN ARAH KIBLAT"), ln=True, align="C")
+    pdf.cell(0, 9, _lat("LAPORAN PENENTUAN ARAH KIBLAT"), new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, _lat("Metode Selisih Azimuth Matahari Harian (Rashdul Qiblah Harian)"),
-             ln=True, align="C")
+             new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
     pdf.ln(3)
 
     def row(label, value):
@@ -628,13 +629,13 @@ def build_pdf(inp, a_k, sol) -> bytes:
         pdf.set_font("Helvetica", "B", 10)
         pdf.cell(55, 6, _lat(label), border=0)
         pdf.set_font("Helvetica", "", 10)
-        pdf.cell(0, 6, _lat(str(value)), ln=True)
+        pdf.cell(0, 6, _lat(str(value)), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, _lat("Nama lokasi / Identitas: ") + _lat(nama), ln=True)
+    pdf.cell(0, 7, _lat("Nama lokasi / Identitas: ") + _lat(nama), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.ln(1)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, "DATA LOKASI", ln=True)
+    pdf.cell(0, 7, "DATA LOKASI", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     row("Lintang", f"{qc.decimal_to_dms(inp['lat'],'lat')}  ({inp['lat']:.6f})")
     row("Bujur", f"{qc.decimal_to_dms(inp['lon'],'lon')}  ({inp['lon']:.6f})")
     row("Elevasi", f"{inp['elev']:.1f} m")
@@ -644,7 +645,7 @@ def build_pdf(inp, a_k, sol) -> bytes:
     pdf.ln(1)
 
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, "HASIL PERHITUNGAN", ln=True)
+    pdf.cell(0, 7, "HASIL PERHITUNGAN", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     row("Azimuth Kiblat (A_k)", qc.decimal_to_dms(a_k, "az"))
     row("Target Azimuth Matahari", qc.decimal_to_dms(a_s, "az"))
     row("Selisih Azimuth (dA)", f"{delta_a:g} deg")
@@ -661,7 +662,7 @@ def build_pdf(inp, a_k, sol) -> bytes:
 
     pdf.set_x(pdf.l_margin)
     pdf.set_font("Helvetica", "B", 11)
-    pdf.cell(0, 7, "LANGKAH LAPANGAN", ln=True)
+    pdf.cell(0, 7, "LANGKAH LAPANGAN", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     steps = [
         "Ratakan papan (waterpass), pasang tiang tegak lurus 90 derajat.",
         f"Pukul {sol.time_str()} {inp['tz_short']}: tandai pangkal (O) & ujung bayangan (B).",
@@ -688,7 +689,7 @@ def build_pdf(inp, a_k, sol) -> bytes:
     # pdf.ln(14)
     # pdf.set_x(pdf.l_margin)
     # pdf.cell(90, 6, "(............................)", border=0)
-    # pdf.cell(0, 6, "(............................)", ln=True)
+    # pdf.cell(0, 6, "(............................)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
     return bytes(pdf.output())
 
@@ -743,13 +744,13 @@ def show_solution(inp, a_k, sol, ref):
             cpdf.download_button(
                 "⬇️ Unduh Laporan PDF", data=pdf_bytes,
                 file_name=f"laporan_kiblat_{inp['the_date']}_{session_key}_{delta_a:g}.pdf",
-                mime="application/pdf", use_container_width=True)
+                mime="application/pdf", width="stretch")
         except Exception as e:  # noqa: BLE001
             cpdf.caption(f"PDF tak tersedia: {e}")
         ctxt.download_button(
             "⬇️ Unduh Teks (.txt)", data=report,
             file_name=f"laporan_kiblat_{inp['the_date']}_{session_key}_{delta_a:g}.txt",
-            mime="text/plain", use_container_width=True)
+            mime="text/plain", width="stretch")
         st.code(report, language="text")
 
 
@@ -855,7 +856,7 @@ def main():
                "online). Jika offline, gunakan jam perangkat mode otomatis.")
 
     hitung = st.button(f"🔮 Hitung Waktu Kiblat — {tgl_id(inp['the_date'])}",
-                       type="primary", use_container_width=True)
+                       type="primary", width="stretch")
 
     if hitung:
         ensure_ephemeris()
@@ -908,7 +909,7 @@ def main():
         st.caption("Pagi & sore digabung, urut waktu. Pilih salah satu untuk melihat simulasi "
                    "& hitung mundur. Default: waktu terdekat.")
         st.dataframe(build_all_df(rows, inp["the_date"], today),
-                     use_container_width=True, hide_index=True)
+                     width="stretch", hide_index=True)
 
         idx0 = nearest_index(rows, inp["the_date"], today)
         labels = [f"{s.time_str()} · {'Pagi' if s.session=='pagi' else 'Sore'} · ΔA {s.delta_a:g}° "
