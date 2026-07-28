@@ -70,12 +70,40 @@ CITIES = {
     "Sorong": (-0.8762, 131.2558, 9.0), "Jayapura": (-2.5916, 140.6690, 9.0),
 }
 
-# GPS opsional (butuh: pip install streamlit-geolocation). Aman bila tak ada.
-try:
-    from streamlit_geolocation import streamlit_geolocation
-    HAS_GPS = True
-except Exception:  # noqa: BLE001
-    HAS_GPS = False
+# Komponen GPS berbasis JS (tanpa paket tambahan). Membaca navigator.geolocation
+# lalu memuat ulang aplikasi dengan ?lat=..&lon.. (bila iframe seizin same-origin);
+# jika diblokir, koordinat ditampilkan untuk disalin ke kolom "Tempel koordinat".
+GPS_HTML = """
+<div style="font-family:system-ui,Segoe UI,Roboto,sans-serif;text-align:center;">
+  <button id="gps" style="padding:8px 14px;border:0;border-radius:10px;
+     background:#12805a;color:#fff;font-size:14px;cursor:pointer;">
+     📍 Deteksi Lokasi (GPS)</button>
+  <div id="msg" style="font-size:12px;color:#6b7280;margin-top:6px;min-height:16px;"></div>
+</div>
+<script>
+(function(){
+  var btn=document.getElementById('gps'), msg=document.getElementById('msg');
+  btn.onclick=function(){
+    if(!navigator.geolocation){ msg.textContent='Browser tak mendukung GPS.'; return; }
+    msg.textContent='Meminta izin lokasi…';
+    navigator.geolocation.getCurrentPosition(function(pos){
+      var lat=pos.coords.latitude.toFixed(6), lon=pos.coords.longitude.toFixed(6);
+      try{
+        var url=new URL(window.parent.location.href);
+        url.searchParams.set('lat',lat); url.searchParams.set('lon',lon);
+        msg.textContent='Lokasi terdeteksi, memuat…';
+        window.parent.location.href=url.href;
+      }catch(e){
+        msg.innerHTML='Koordinat: <b>'+lat+', '+lon+'</b><br>Salin & tempel ke kolom '
+                      +'"Tempel koordinat" di atas.';
+        try{ navigator.clipboard.writeText(lat+', '+lon); }catch(_){}
+      }
+    }, function(err){ msg.textContent='Gagal mengambil lokasi: '+err.message; },
+    {enableHighAccuracy:true, timeout:10000, maximumAge:0});
+  };
+})();
+</script>
+"""
 
 
 @st.cache_resource(show_spinner="Memuat/mengunduh ephemeris DE440s (±32 MB)…")
@@ -217,19 +245,15 @@ def _maybe_apply_city(city):
     st.session_state["_last_city"] = city
 
 
-def _maybe_apply_gps(loc):
-    try:
-        lat, lon = loc.get("latitude"), loc.get("longitude")
-    except Exception:  # noqa: BLE001
-        return
-    if lat is None or lon is None:
-        return
-    key = (round(lat, 6), round(lon, 6))
-    if st.session_state.get("_last_gps") == key:
-        return
-    _set_coord_state(lat, lon)
-    st.session_state["_last_gps"] = key
-    st.rerun()
+def _apply_gps_query():
+    """Ambil koordinat dari query URL (?lat=..&lon..) yang diisi komponen GPS."""
+    qp = st.query_params
+    if "lat" in qp and "lon" in qp:
+        try:
+            _set_coord_state(float(qp["lat"]), float(qp["lon"]))
+        except Exception:  # noqa: BLE001
+            pass
+        st.query_params.clear()  # bersihkan agar tak diproses ulang
 
 
 def _maybe_apply_paste(text):
@@ -255,6 +279,8 @@ def sidebar_inputs() -> dict:
                  "lon_d": 109, "lon_m": 43, "lon_s": 0.0, "lon_h": "E"}.items():
         st.session_state.setdefault(k, v)
 
+    _apply_gps_query()  # tangkap koordinat GPS dari URL bila ada
+
     # --- Lokasi ---
     st.sidebar.subheader("🏙️ Lokasi")
     city = st.sidebar.selectbox("Pilih kota", [MANUAL_OPT] + list(CITIES.keys()), key="city_sel")
@@ -264,13 +290,9 @@ def sidebar_inputs() -> dict:
                                   placeholder="-6.98, 109.61")
     _maybe_apply_paste(paste)
 
-    if HAS_GPS:
-        with st.sidebar.expander("📡 Pakai GPS perangkat"):
-            st.caption("Klik ikon lalu izinkan akses lokasi di browser.")
-            try:
-                _maybe_apply_gps(streamlit_geolocation())
-            except Exception:  # noqa: BLE001
-                st.caption("GPS tidak tersedia di perangkat/browser ini.")
+    with st.sidebar.expander("📡 Deteksi lokasi (GPS)"):
+        st.caption("Klik tombol lalu izinkan akses lokasi di browser.")
+        components.html(GPS_HTML, height=90)
 
     with st.sidebar.expander("Koordinat manual (derajat-menit-detik)"):
         st.markdown("**Lintang**")
