@@ -42,7 +42,7 @@ def tgl_id(d):
 
 
 # ---------------------------------------------------------------------------
-st.set_page_config(page_title="Arah Kiblat — Rashdul Qiblah Harian",
+st.set_page_config(page_title="BayangKiblat — Arah Kiblat via Bayangan Matahari",
                    page_icon="🕋", layout="wide")
 
 TZ_OPTIONS = {"WIB (UTC+7)": 7.0, "WITA (UTC+8)": 8.0, "WIT (UTC+9)": 9.0, "Kustom": None}
@@ -816,9 +816,9 @@ def _sig(inp):
 
 
 def main():
-    st.title("🕋 Penentu Arah Kiblat — Rashdul Qiblah Harian")
-    st.caption("Metode Selisih Azimuth Matahari Harian · Skyfield + JPL DE440s · "
-               "Koordinat Kakbah acuan Kemenag RI")
+    st.title("🕋 BayangKiblat")
+    st.caption("Penentu Arah Kiblat berbasis Matahari — Rashdul Qiblah Harian & "
+               "Metode Selisih Azimuth · Skyfield + JPL DE440s · Koordinat Kakbah acuan Kemenag RI")
 
     inp = sidebar_inputs()
 

@@ -15,6 +15,15 @@ Thumbs.db
 .idea/
 .vscode/
 
+<<<<<<< HEAD
+=======
+# Berkas sementara/kunci Microsoft Office
+~$*
+
+# Modul praktikum (dokumen terpisah, tidak disertakan ke repo kode)
+Modul Praktikum Arah Kiblat.docx
+
+>>>>>>> 645ddf1 (Aplikasi Arah Kiblat Easy)
 # Efemeris: TIDAK di-commit (push 32 MB sering timeout di koneksi lambat).
 # Aplikasi mengunduhnya OTOMATIS saat pertama jalan di server (Streamlit Cloud).
 de440s.bsp

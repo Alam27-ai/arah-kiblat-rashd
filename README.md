@@ -1,4 +1,4 @@
-# Arah Kiblat Easy — Penentu Arah Kiblat Metode Rashdul Qiblah Harian
+# BayangKiblat — Penentu Arah Kiblat berbasis Matahari
 
 Aplikasi web interaktif (Streamlit) untuk menentukan **arah Kiblat** di lokasi
 mana pun di Indonesia menggunakan **bayangan Matahari**, berbasis efemeris
