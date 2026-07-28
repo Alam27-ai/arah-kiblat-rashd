@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import datetime as dt
 import math
-import re
 import tempfile
 import time
 
@@ -47,29 +46,10 @@ st.set_page_config(page_title="BayangKiblat — Arah Kiblat via Bayangan Matahar
                    page_icon="🕋", layout="wide")
 
 TZ_OPTIONS = {"WIB (UTC+7)": 7.0, "WITA (UTC+8)": 8.0, "WIT (UTC+9)": 9.0, "Kustom": None}
-OFF2LABEL = {7.0: "WIB (UTC+7)", 8.0: "WITA (UTC+8)", 9.0: "WIT (UTC+9)"}
-MANUAL_OPT = "📍 Manual / isi sendiri"
 
 # Rentang ΔA per sesi (dipakai internal; pengguna tak perlu memilih).
 RANGE_PAGI = (10, 80)
 RANGE_SORE = (100, 170)
-
-# Daftar kota Indonesia: nama -> (lintang, bujur, offset UTC)
-CITIES = {
-    "Banda Aceh": (5.5483, 95.3238, 7.0), "Medan": (3.5952, 98.6722, 7.0),
-    "Padang": (-0.9471, 100.4172, 7.0), "Pekanbaru": (0.5071, 101.4478, 7.0),
-    "Palembang": (-2.9761, 104.7754, 7.0), "Bandar Lampung": (-5.3971, 105.2668, 7.0),
-    "Jakarta": (-6.2088, 106.8456, 7.0), "Bogor": (-6.5971, 106.8060, 7.0),
-    "Bandung": (-6.9175, 107.6191, 7.0), "Pekalongan": (-6.8886, 109.6753, 7.0),
-    "Semarang": (-6.9932, 110.4203, 7.0), "Surakarta (Solo)": (-7.5755, 110.8243, 7.0),
-    "Yogyakarta": (-7.7956, 110.3695, 7.0), "Surabaya": (-7.2575, 112.7521, 7.0),
-    "Malang": (-7.9666, 112.6326, 7.0), "Denpasar": (-8.6705, 115.2126, 8.0),
-    "Mataram": (-8.5833, 116.1167, 8.0), "Banjarmasin": (-3.3194, 114.5908, 8.0),
-    "Balikpapan": (-1.2379, 116.8529, 8.0), "Samarinda": (-0.5017, 117.1536, 8.0),
-    "Makassar": (-5.1477, 119.4327, 8.0), "Manado": (1.4748, 124.8421, 8.0),
-    "Kupang": (-10.1772, 123.6070, 8.0), "Ambon": (-3.6954, 128.1814, 9.0),
-    "Sorong": (-0.8762, 131.2558, 9.0), "Jayapura": (-2.5916, 140.6690, 9.0),
-}
 
 # Deteksi lokasi GPS memakai streamlit-js-eval (get_geolocation), yang memakai
 # protokol komponen resmi Streamlit (postMessage) — BUKAN navigasi iframe, karena
@@ -204,18 +184,6 @@ def _set_coord_state(lat, lon):
         st.session_state[f"{prefix}_h"] = h
 
 
-def _maybe_apply_city(city):
-    if city == MANUAL_OPT:
-        st.session_state["_last_city"] = city
-        return
-    if st.session_state.get("_last_city") == city:
-        return
-    lat, lon, off = CITIES[city]
-    _set_coord_state(lat, lon)
-    st.session_state["tz_label"] = OFF2LABEL.get(off, "WIB (UTC+7)")
-    st.session_state["_last_city"] = city
-
-
 def _apply_gps_result():
     """Ambil lokasi dari streamlit-js-eval bila kotak deteksi GPS dicentang."""
     if not st.session_state.get("_gps_on"):
@@ -240,19 +208,6 @@ def _apply_gps_result():
         st.success(f"📍 Lokasi terdeteksi: {lat:.5f}, {lon:.5f}")
 
 
-def _maybe_apply_paste(text):
-    """Terima koordinat desimal seperti '-6.98, 109.61' (format Google Maps)."""
-    if not text or st.session_state.get("_last_paste") == text:
-        return
-    parts = re.findall(r"[-+]?\d+(?:\.\d+)?", text)
-    if len(parts) >= 2:
-        lat, lon = float(parts[0]), float(parts[1])
-        if -90 <= lat <= 90 and -180 <= lon <= 180:
-            _set_coord_state(lat, lon)
-            st.session_state["_last_paste"] = text
-            st.rerun()
-
-
 # ---------------------------------------------------------------------------
 # SIDEBAR — hanya yang esensial; sisanya di "Lanjutan"
 # ---------------------------------------------------------------------------
@@ -265,19 +220,11 @@ def sidebar_inputs() -> dict:
 
     # --- Lokasi ---
     st.sidebar.subheader("🏙️ Lokasi")
-    city = st.sidebar.selectbox("Pilih kota", [MANUAL_OPT] + list(CITIES.keys()), key="city_sel")
-    _maybe_apply_city(city)
+    st.sidebar.checkbox("📡 Deteksi lokasi otomatis (GPS)", key="_gps_on",
+                        help="Browser akan meminta izin akses lokasi.")
+    _apply_gps_result()
 
-    paste = st.sidebar.text_input("Atau tempel koordinat (dari Google Maps)",
-                                  placeholder="-6.98, 109.61")
-    _maybe_apply_paste(paste)
-
-    with st.sidebar.expander("📡 Deteksi lokasi (GPS)"):
-        st.checkbox("Aktifkan deteksi GPS", key="_gps_on",
-                    help="Browser akan meminta izin akses lokasi.")
-        _apply_gps_result()
-
-    with st.sidebar.expander("Koordinat manual (derajat-menit-detik)"):
+    with st.sidebar.expander("Koordinat manual (derajat-menit-detik)", expanded=True):
         st.markdown("**Lintang**")
         la, lb, lc, ld = st.columns(4)
         la.number_input("°", 0, 90, key="lat_d")
