@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Efemeris: TIDAK di-commit (push 32 MB sering timeout di koneksi lambat).
+# Aplikasi mengunduhnya OTOMATIS saat pertama jalan di server (Streamlit Cloud).
+de440s.bsp
+de440.bsp
+de441.bsp

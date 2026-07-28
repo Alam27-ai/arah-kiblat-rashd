@@ -1,0 +1,10 @@
+streamlit>=1.32
+skyfield>=1.49
+numpy>=1.24
+matplotlib>=3.7
+pandas>=2.0
+ntplib>=0.4.0
+fpdf2>=2.7
+
+# Opsional — untuk tombol GPS perangkat (aplikasi tetap jalan tanpa ini):
+# streamlit-geolocation>=0.0.10
