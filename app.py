@@ -28,6 +28,7 @@ from matplotlib.patches import Arc
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from streamlit_js_eval import get_geolocation
 
 import qibla_core as qc
 
@@ -70,40 +71,10 @@ CITIES = {
     "Sorong": (-0.8762, 131.2558, 9.0), "Jayapura": (-2.5916, 140.6690, 9.0),
 }
 
-# Komponen GPS berbasis JS (tanpa paket tambahan). Membaca navigator.geolocation
-# lalu memuat ulang aplikasi dengan ?lat=..&lon.. (bila iframe seizin same-origin);
-# jika diblokir, koordinat ditampilkan untuk disalin ke kolom "Tempel koordinat".
-GPS_HTML = """
-<div style="font-family:system-ui,Segoe UI,Roboto,sans-serif;text-align:center;">
-  <button id="gps" style="padding:8px 14px;border:0;border-radius:10px;
-     background:#12805a;color:#fff;font-size:14px;cursor:pointer;">
-     📍 Deteksi Lokasi (GPS)</button>
-  <div id="msg" style="font-size:12px;color:#6b7280;margin-top:6px;min-height:16px;"></div>
-</div>
-<script>
-(function(){
-  var btn=document.getElementById('gps'), msg=document.getElementById('msg');
-  btn.onclick=function(){
-    if(!navigator.geolocation){ msg.textContent='Browser tak mendukung GPS.'; return; }
-    msg.textContent='Meminta izin lokasi…';
-    navigator.geolocation.getCurrentPosition(function(pos){
-      var lat=pos.coords.latitude.toFixed(6), lon=pos.coords.longitude.toFixed(6);
-      try{
-        var url=new URL(window.parent.location.href);
-        url.searchParams.set('lat',lat); url.searchParams.set('lon',lon);
-        msg.textContent='Lokasi terdeteksi, memuat…';
-        window.parent.location.href=url.href;
-      }catch(e){
-        msg.innerHTML='Koordinat: <b>'+lat+', '+lon+'</b><br>Salin & tempel ke kolom '
-                      +'"Tempel koordinat" di atas.';
-        try{ navigator.clipboard.writeText(lat+', '+lon); }catch(_){}
-      }
-    }, function(err){ msg.textContent='Gagal mengambil lokasi: '+err.message; },
-    {enableHighAccuracy:true, timeout:10000, maximumAge:0});
-  };
-})();
-</script>
-"""
+# Deteksi lokasi GPS memakai streamlit-js-eval (get_geolocation), yang memakai
+# protokol komponen resmi Streamlit (postMessage) — BUKAN navigasi iframe, karena
+# iframe komponen Streamlit di-sandbox dan memblokir navigasi window.parent/top,
+# sehingga pendekatan JS mentah sebelumnya gagal secara diam-diam.
 
 
 @st.cache_resource(show_spinner="Memuat/mengunduh ephemeris DE440s (±32 MB)…")
@@ -245,15 +216,28 @@ def _maybe_apply_city(city):
     st.session_state["_last_city"] = city
 
 
-def _apply_gps_query():
-    """Ambil koordinat dari query URL (?lat=..&lon..) yang diisi komponen GPS."""
-    qp = st.query_params
-    if "lat" in qp and "lon" in qp:
-        try:
-            _set_coord_state(float(qp["lat"]), float(qp["lon"]))
-        except Exception:  # noqa: BLE001
-            pass
-        st.query_params.clear()  # bersihkan agar tak diproses ulang
+def _apply_gps_result():
+    """Ambil lokasi dari streamlit-js-eval bila kotak deteksi GPS dicentang."""
+    if not st.session_state.get("_gps_on"):
+        return
+    loc = get_geolocation(component_key="gps_loc")
+    if not loc:
+        st.caption("⏳ Menunggu izin lokasi dari browser…")
+        return
+    if "error" in loc:
+        code = loc["error"].get("code")
+        msg = loc["error"].get("message", "")
+        if code == 1:
+            st.error("Izin lokasi ditolak di browser. Aktifkan lewat ikon 🔒/ⓘ di address bar, lalu coba lagi.")
+        else:
+            st.warning(f"Gagal mengambil lokasi (kode {code}): {msg}")
+        return
+    lat = loc["coords"]["latitude"]
+    lon = loc["coords"]["longitude"]
+    if st.session_state.get("_last_gps") != (lat, lon):
+        _set_coord_state(lat, lon)
+        st.session_state["_last_gps"] = (lat, lon)
+        st.success(f"📍 Lokasi terdeteksi: {lat:.5f}, {lon:.5f}")
 
 
 def _maybe_apply_paste(text):
@@ -279,8 +263,6 @@ def sidebar_inputs() -> dict:
                  "lon_d": 109, "lon_m": 43, "lon_s": 0.0, "lon_h": "E"}.items():
         st.session_state.setdefault(k, v)
 
-    _apply_gps_query()  # tangkap koordinat GPS dari URL bila ada
-
     # --- Lokasi ---
     st.sidebar.subheader("🏙️ Lokasi")
     city = st.sidebar.selectbox("Pilih kota", [MANUAL_OPT] + list(CITIES.keys()), key="city_sel")
@@ -291,8 +273,9 @@ def sidebar_inputs() -> dict:
     _maybe_apply_paste(paste)
 
     with st.sidebar.expander("📡 Deteksi lokasi (GPS)"):
-        st.caption("Klik tombol lalu izinkan akses lokasi di browser.")
-        components.html(GPS_HTML, height=90)
+        st.checkbox("Aktifkan deteksi GPS", key="_gps_on",
+                    help="Browser akan meminta izin akses lokasi.")
+        _apply_gps_result()
 
     with st.sidebar.expander("Koordinat manual (derajat-menit-detik)"):
         st.markdown("**Lintang**")
