@@ -86,6 +86,42 @@ def test_rashdul_geometri():
     print(f"[OK] rashdul: {len(r['events'])} event, azimuth = target")
 
 
+def test_solve_instant_geometri_dan_arah():
+    """solve_instant: sudut putar tak dibulatkan, arah kanan/kiri konsisten dgn tanda selisih."""
+    lat = qc.dms_to_decimal(6, 53, 18.96, "S")
+    lon = qc.dms_to_decimal(109, 40, 31.08, "E")
+    tz = dt.timezone(dt.timedelta(hours=7))
+    a_k = qc.azimuth_kiblat(lat, lon)
+
+    for hh in (7, 9, 12, 15, 17):
+        dt_local = dt.datetime(2026, 7, 30, hh, 13, 27, tzinfo=tz)
+        out = qc.solve_instant(lat, lon, 0.0, dt_local, height=1.0)
+        sol, arah = out["solution"], out["arah"]
+        assert out["a_k"] == a_k
+
+        if sol.sun_altitude <= 0:
+            continue  # matahari di bawah ufuk, lewati
+
+        # delta_a umumnya TIDAK bulat (inti fitur mode bebas waktu)
+        assert sol.delta_a >= 0.0
+        assert sol.shadow_azimuth == (sol.sun_azimuth + 180.0) % 360.0
+
+        # geometri: memutar shadow_azimuth ke arah yg benar sejauh delta_a harus == a_k
+        sign = 1.0 if arah == "kanan" else -1.0
+        hasil = (sol.shadow_azimuth + sign * sol.delta_a) % 360.0
+        assert abs(qc._ang_diff(hasil, a_k)) < 1e-6, (
+            f"jam {hh}: arah={arah} delta={sol.delta_a} tidak sampai ke A_k"
+        )
+
+    # waktu tanpa tzinfo harus ditolak
+    try:
+        qc.solve_instant(lat, lon, 0.0, dt.datetime(2026, 7, 30, 9, 0, 0))
+        assert False, "seharusnya ValueError untuk datetime naive"
+    except ValueError:
+        pass
+    print("[OK] solve_instant: geometri & arah konsisten di semua jam uji")
+
+
 def test_dms_bolak_balik():
     """Konversi desimal↔DMS konsisten (contoh koordinat Kakbah)."""
     s = qc.decimal_to_dms(qc.KAABA_LAT, "lat")
@@ -102,5 +138,6 @@ if __name__ == "__main__":
     test_kasus_tanpa_solusi()
     test_compute_all_terurut_dan_bulat()
     test_rashdul_geometri()
+    test_solve_instant_geometri_dan_arah()
     test_dms_bolak_balik()
     print("\nSemua pengujian selesai.")

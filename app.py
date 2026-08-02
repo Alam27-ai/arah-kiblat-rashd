@@ -761,6 +761,84 @@ def render_rashdul(inp, rash, ref):
 
 
 # ---------------------------------------------------------------------------
+# MODE BEBAS WAKTU (ΔA presisi, tidak dibulatkan — untuk pengukuran dibantu CV)
+# ---------------------------------------------------------------------------
+def render_instant_mode(inp, ref):
+    st.caption(
+        "Sudut di sini **tidak dibulatkan** — cocok untuk siapa pun yang membaca "
+        "sudutnya lewat citra (bukan busur derajat manual). Pilih waktu apa saja "
+        "(termasuk sekarang), lalu putar sesuai sudut hasil hitung."
+    )
+
+    tz = dt.timezone(dt.timedelta(hours=inp["tz_offset"]))
+    is_today = inp["the_date"] == user_today(inp["tz_offset"])
+    now_t = dt.datetime.now(tz).time()
+    default_t = now_t if is_today else dt.time(12, 0, 0)
+
+    c1, c2 = st.columns([3, 1])
+    t_hm = c1.time_input("⏱️ Waktu pengukuran (jam:menit)",
+                         value=default_t.replace(second=0, microsecond=0), step=60)
+    sec = c2.number_input("Detik", 0, 59, value=default_t.second if is_today else 0)
+    t = t_hm.replace(second=int(sec))
+    dt_local = dt.datetime.combine(inp["the_date"], t, tzinfo=tz)
+
+    ensure_ephemeris()
+    try:
+        out = qc.solve_instant(inp["lat"], inp["lon"], inp["elev"], dt_local, inp["height"])
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Kesalahan perhitungan: {e}")
+        return
+
+    a_k, sol, arah = out["a_k"], out["solution"], out["arah"]
+
+    if sol.sun_altitude <= 0:
+        st.warning("☾ Matahari di bawah ufuk pada waktu ini — tidak ada bayangan. "
+                   "Pilih waktu lain (siang hari).")
+        return
+
+    st.markdown(
+        f"""
+<div style="text-align:center;padding:18px;border-radius:16px;
+            background:linear-gradient(135deg,#0e5c3f,#12805a);color:#fff;margin-bottom:10px;">
+  <div style="font-size:15px;opacity:.85;letter-spacing:1px;">SUDUT PUTAR DARI BAYANGAN</div>
+  <div style="font-size:56px;font-weight:800;line-height:1.1;">{sol.delta_a:.3f}°</div>
+  <div style="font-size:17px;opacity:.9;">ke arah {arah.upper()} · {t.strftime('%H:%M:%S')} {inp['tz_short']} · {tgl_id(inp['the_date'])}</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    if is_today:
+        render_countdown(sol, inp, ref)
+
+    d1, d2, d3 = st.columns(3)
+    d1.metric("Altitude Matahari", qc.decimal_to_dms(sol.sun_altitude, "alt"))
+    d2.metric("Panjang Bayangan",
+              f"{sol.shadow_length:.3f} m" if sol.shadow_length is not None else "—")
+    d3.metric("Azimuth Kiblat (A_k)", qc.decimal_to_dms(a_k, "az"))
+
+    if sol.sun_altitude < 10:
+        st.warning("Altitude rendah: bayangan panjang & ujung kabur.")
+    elif sol.sun_altitude > 65:
+        st.warning("Altitude tinggi: bayangan pendek — juga memperbesar dampak "
+                   "kemiringan gnomon (galat ≈ kemiringan × tan(altitude)).")
+    else:
+        st.success("Altitude ideal untuk pengukuran bayangan (±15°–60°).")
+
+    # session_key "pagi"~kanan / "sore"~kiri dipakai ulang murni sebagai kode arah,
+    # bukan penanda sesi pagi/sore sungguhan — konvensi putarnya sama persis.
+    session_key = "pagi" if arah == "kanan" else "sore"
+    st.pyplot(render_simulation(a_k, sol, sol.delta_a, session_key, inp["height"]))
+    field_instructions(session_key, sol.delta_a, t.strftime("%H:%M:%S"), inp["tz_short"])
+
+    st.caption(
+        "📸 Ambil foto papan kalibrasi + bayangan pada detik ini, lalu ukur sudutnya "
+        "lewat pipeline CV (lihat `RENCANA_CV.md`). Karena sudutnya presisi (bukan "
+        "kelipatan bulat), pembacaan manual pakai busur derajat kurang cocok di mode ini."
+    )
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def _sig(inp):
@@ -784,6 +862,20 @@ def main():
 
     st.caption("🕐 Waktu eksekusi mengacu ke jam resmi **BMKG** (diselaraskan otomatis saat "
                "online). Jika offline, gunakan jam perangkat mode otomatis.")
+
+    mode = st.radio(
+        "Mode pengukuran",
+        ["🗓️ Terjadwal (ΔA bulat — busur manual)",
+         "🎯 Bebas waktu (ΔA presisi — kamera/CV)"],
+        horizontal=True,
+    )
+
+    if mode.startswith("🎯"):
+        st.metric("Azimuth Kiblat lokasi ini (A_k)",
+                  qc.decimal_to_dms(qc.azimuth_kiblat(inp["lat"], inp["lon"]), "az"))
+        st.divider()
+        render_instant_mode(inp, get_time_reference())
+        return
 
     hitung = st.button(f"🔮 Hitung Waktu Kiblat — {tgl_id(inp['the_date'])}",
                        type="primary", width="stretch")

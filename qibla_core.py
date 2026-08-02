@@ -290,6 +290,49 @@ def compute_all(lat, lon, elev, the_date, tz_offset, height: float = 1.0,
 
 
 # ---------------------------------------------------------------------------
+# MODE BEBAS WAKTU (snapshot pada momen APA PUN — ΔA presisi, tidak dibulatkan)
+# ---------------------------------------------------------------------------
+def solve_instant(lat, lon, elev, dt_local: datetime, height: float = 1.0) -> dict:
+    """
+    Hitung sudut putar Kiblat pada satu momen APA PUN (tidak menunggu ΔA bulat).
+
+    Tidak ada pencarian waktu di sini — waktunya sudah tetap (dt_local), yang
+    dihitung hanyalah azimuth Matahari saat itu dan selisihnya terhadap Kiblat.
+    Cocok dipasangkan dengan pengukuran sudut berbantuan citra (CV), yang bisa
+    membaca sudut presisi (bukan cuma kelipatan bulat busur derajat).
+
+    dt_local harus timezone-aware (mis. dibuat dengan tzinfo=timezone(...)).
+
+    Kembalikan {a_k, solution, arah}:
+      - solution.delta_a = besar sudut putar (selalu >= 0, TIDAK dibulatkan)
+      - arah = "kanan" (searah jarum jam) atau "kiri" (berlawanan jarum jam)
+      - solution.session diisi sama dengan `arah`, dipakai ulang oleh kode
+        render/instruksi lapangan yang sudah ada (konvensi "kanan"~"pagi",
+        "kiri"~"sore" pada fungsi tersebut menghasilkan arah putar yang sama).
+    """
+    if dt_local.tzinfo is None:
+        raise ValueError("dt_local harus timezone-aware")
+
+    a_k = azimuth_kiblat(lat, lon)
+    observer, sun, ts = _make_observer(lat, lon, elev)
+    alt, az = sun_altaz(observer, sun, ts, dt_local.astimezone(timezone.utc))
+    shadow_az = (az + 180.0) % 360.0
+    diff = _ang_diff(a_k, shadow_az)          # (-180, 180]
+    arah = "kanan" if diff >= 0 else "kiri"
+
+    sol = Solution(
+        local_time=dt_local,
+        sun_azimuth=az,
+        sun_altitude=alt,
+        shadow_length=shadow_length(height, alt),
+        shadow_azimuth=shadow_az,
+        delta_a=abs(diff),
+        session=arah,
+    )
+    return {"a_k": a_k, "solution": sol, "arah": arah}
+
+
+# ---------------------------------------------------------------------------
 # RASHDUL QIBLAH HARIAN (kasus ΔA = 0, tanpa busur)
 # ---------------------------------------------------------------------------
 def rashdul_qiblah(lat, lon, elev, the_date, tz_offset, height: float = 1.0,
