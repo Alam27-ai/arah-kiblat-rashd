@@ -15,21 +15,39 @@ Perhitungan astronomi ada di qibla_core.py.
 
 from __future__ import annotations
 
+import csv
 import datetime as dt
+import io
 import math
+import os
 import tempfile
 import time
 
+import cv2
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Arc
+import numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from PIL import Image
+from streamlit_image_coordinates import streamlit_image_coordinates
 from streamlit_js_eval import get_geolocation
 
+import papan_charuco as pc
 import qibla_core as qc
+
+LOG_UKUR_CV = "log_ukur_cv.csv"
+LOG_UKUR_CV_HEADER = [
+    "waktu_dicatat", "nama_file", "lat", "lon", "waktu_potret", "tinggi_gnomon_m",
+    "kotak_mm", "panjang_bayangan_mm", "delta_a_target_deg", "arah",
+    "altitude_efemeris_deg", "altitude_terukur_deg", "selisih_altitude_deg",
+    "validasi_altitude_ok", "vonis_mutu_foto", "bias_mutu_deg",
+    "sisi_potong_tepi", "posisi_potong_cm",
+    "selisih_referensi_deg", "catatan",
+]
 
 # Nama bulan Indonesia (tidak bergantung locale server)
 BULAN_ID = ["", "Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli",
@@ -211,8 +229,10 @@ def _apply_gps_result():
 # ---------------------------------------------------------------------------
 # SIDEBAR — hanya yang esensial; sisanya di "Lanjutan"
 # ---------------------------------------------------------------------------
-def sidebar_inputs() -> dict:
+def sidebar_inputs(mode: str) -> dict:
     st.sidebar.header("⚙️ Pengaturan")
+
+    _terapkan_exif_pending_lokasi()  # sebelum widget lat/lon/tanggal dibuat
 
     for k, v in {"lat_d": 6, "lat_m": 59, "lat_s": 0.0, "lat_h": "S",
                  "lon_d": 109, "lon_m": 43, "lon_s": 0.0, "lon_h": "E"}.items():
@@ -254,22 +274,44 @@ def sidebar_inputs() -> dict:
         tz_short = tz_label.split()[0]
 
     # --- Tanggal (default: hari ini menurut zona waktu pengguna) ---
-    the_date = st.sidebar.date_input("📅 Tanggal Pengukuran", value=user_today(tz_offset))
+    # key="the_date" sengaja ditambahkan (bukan cuma dibiarkan auto) supaya
+    # bisa diisi otomatis dari EXIF foto di mode "Ukur dari Foto" — lihat
+    # _isi_otomatis_dari_exif().
+    st.session_state.setdefault("the_date", user_today(tz_offset))
+    the_date = st.sidebar.date_input("📅 Tanggal Pengukuran", key="the_date")
 
     # --- Tiang ---
-    height = st.sidebar.number_input("📏 Tinggi tiang tegak (meter)", min_value=0.05,
-                                     value=1.0, step=0.1, format="%.2f")
+    # Cuma relevan untuk mode Terjadwal & Bebas waktu (tiang/tongkat FISIK
+    # sungguhan di lapangan). Mode "Ukur dari Foto" punya gnomon PAPAN sendiri
+    # (field "Tinggi gnomon di papan" di dalam mode itu, skalanya beda jauh —
+    # cm bukan meter) yang benar-benar dipakai untuk hitungan §7.3 di sana;
+    # field ini disembunyikan di mode itu supaya tidak ada dua "tinggi
+    # gnomon/tiang" nampang bersamaan dan membingungkan mana yang dipakai.
+    if not mode.startswith("📷"):
+        height = st.sidebar.number_input("📏 Tinggi tiang tegak (meter)", min_value=0.05,
+                                         value=1.0, step=0.1, format="%.2f", key="height_tiang")
+    else:
+        st.session_state.setdefault("height_tiang", 1.0)
+        height = st.session_state["height_tiang"]
 
-    # --- Identitas untuk laporan ---
-    nama = st.sidebar.text_input("🏷️ Nama lokasi / identitas ", "")
+    # --- Identitas untuk laporan --- (cuma dipakai laporan PDF mode Terjadwal)
+    if mode.startswith("🗓️"):
+        nama = st.sidebar.text_input("🏷️ Nama lokasi / identitas ", key="nama_lokasi")
+    else:
+        st.session_state.setdefault("nama_lokasi", "")
+        nama = st.session_state["nama_lokasi"]
 
     # --- Lanjutan ---
     with st.sidebar.expander("🔧 Lanjutan"):
         elev = st.number_input("Elevasi (meter)", value=0.0, step=1.0,
                                help="Praktis tidak memengaruhi arah/azimuth Matahari.")
-        step = st.radio("Kerapatan sudut busur ΔA (derajat)", [5, 1], index=0, horizontal=True,
-                        help="Sudut busur dibulatkan ke kelipatan ini. 5° = ringkas, "
-                             "1° = rinci (menangkap lebih banyak peluang).")
+        # "step" cuma dipakai pencarian busur ΔA bulat mode Terjadwal.
+        if mode.startswith("🗓️"):
+            step = st.radio("Kerapatan sudut busur ΔA (derajat)", [5, 1], index=0, horizontal=True,
+                            help="Sudut busur dibulatkan ke kelipatan ini. 5° = ringkas, "
+                                 "1° = rinci (menangkap lebih banyak peluang).")
+        else:
+            step = 5
 
     return {
         "lat": lat, "lon": lon, "elev": elev,
@@ -772,14 +814,25 @@ def render_instant_mode(inp, ref):
 
     tz = dt.timezone(dt.timedelta(hours=inp["tz_offset"]))
     is_today = inp["the_date"] == user_today(inp["tz_offset"])
-    now_t = dt.datetime.now(tz).time()
-    default_t = now_t if is_today else dt.time(12, 0, 0)
 
-    c1, c2 = st.columns([3, 1])
-    t_hm = c1.time_input("⏱️ Waktu pengukuran (jam:menit)",
-                         value=default_t.replace(second=0, microsecond=0), step=60)
-    sec = c2.number_input("Detik", 0, 59, value=default_t.second if is_today else 0)
-    t = t_hm.replace(second=int(sec))
+    if "instant_hm" not in st.session_state:
+        now_t = dt.datetime.now(tz).time() if is_today else dt.time(12, 0, 0)
+        st.session_state["instant_hm"] = now_t.replace(second=0, microsecond=0)
+        st.session_state["instant_sec"] = now_t.second if is_today else 0
+
+    def _set_now():
+        # Callback dijalankan SEBELUM widget dibuat ulang, sehingga aman
+        # mengubah session_state kunci widget di sini (tidak boleh dari luar callback).
+        now_t2 = dt.datetime.now(tz).time()
+        st.session_state["instant_hm"] = now_t2.replace(second=0, microsecond=0)
+        st.session_state["instant_sec"] = now_t2.second
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    c1.time_input("⏱️ Waktu pengukuran", key="instant_hm", step=60)
+    c2.number_input("Detik", 0, 59, key="instant_sec")
+    c3.button("🔄 Sekarang", width="stretch", help="Isi waktu saat ini", on_click=_set_now)
+
+    t = st.session_state["instant_hm"].replace(second=int(st.session_state["instant_sec"]))
     dt_local = dt.datetime.combine(inp["the_date"], t, tzinfo=tz)
 
     ensure_ephemeris()
@@ -808,8 +861,13 @@ def render_instant_mode(inp, ref):
         unsafe_allow_html=True,
     )
 
-    if is_today:
+    now_local = dt.datetime.now(tz)
+    if dt_local >= now_local - dt.timedelta(seconds=2):
         render_countdown(sol, inp, ref)
+    elif is_today:
+        lewat_menit = int((now_local - dt_local).total_seconds() // 60)
+        st.caption(f"🕓 Waktu ini sudah lewat ({lewat_menit} menit lalu) — cocok untuk "
+                   "pratinjau/uji perhitungan, bukan eksekusi langsung.")
 
     d1, d2, d3 = st.columns(3)
     d1.metric("Altitude Matahari", qc.decimal_to_dms(sol.sun_altitude, "alt"))
@@ -839,6 +897,467 @@ def render_instant_mode(inp, ref):
 
 
 # ---------------------------------------------------------------------------
+# MENU BARU: "Ukur dari Foto" — pengukuran sudut Kiblat dari papan ChArUco
+# ---------------------------------------------------------------------------
+def baca_exif_foto(raw_bytes: bytes) -> dict:
+    """Baca metadata GPS + waktu potret dari EXIF foto, kalau ada.
+
+    Mengembalikan dict {lat, lon, tanggal (date), jam (time)} — key yang
+    infonya tidak ada di EXIF cukup dihilangkan (bukan error). Ini NORMAL,
+    bukan tanda foto rusak: kompresi WhatsApp/medsos menghapus semua EXIF,
+    dan banyak kamera HP tidak menyematkan GPS kalau izin lokasi untuk
+    aplikasi kameranya tidak aktif saat memotret. Fungsi ini dibuat untuk
+    mempersingkat input di mode "Ukur dari Foto" KALAU datanya ada — bukan
+    prasyarat, alur manual/GPS-browser yang sudah ada tetap jadi andalan.
+    """
+    hasil: dict = {}
+    try:
+        img = Image.open(io.BytesIO(raw_bytes))
+        exif = img.getexif()
+        if not exif:
+            return hasil
+    except Exception:
+        return hasil
+
+    try:
+        exif_ifd = exif.get_ifd(0x8769)  # Exif IFD
+        dt_str = exif_ifd.get(0x9003) or exif.get(0x0132)  # DateTimeOriginal / DateTime
+        if dt_str:
+            dt_obj = dt.datetime.strptime(dt_str, "%Y:%m:%d %H:%M:%S")
+            hasil["tanggal"] = dt_obj.date()
+            hasil["jam"] = dt_obj.time()
+    except Exception:
+        pass
+
+    try:
+        gps_ifd = exif.get_ifd(0x8825)  # GPS IFD
+        if gps_ifd:
+            lat_dms, lat_ref = gps_ifd.get(2), gps_ifd.get(1)
+            lon_dms, lon_ref = gps_ifd.get(4), gps_ifd.get(3)
+            if lat_dms and lon_dms:
+                def _dms_ke_desimal(dms):
+                    d, m, s = float(dms[0]), float(dms[1]), float(dms[2])
+                    return d + m / 60 + s / 3600
+                lat = _dms_ke_desimal(lat_dms)
+                lon = _dms_ke_desimal(lon_dms)
+                if lat_ref in ("S", b"S"):
+                    lat = -lat
+                if lon_ref in ("W", b"W"):
+                    lon = -lon
+                hasil["lat"] = lat
+                hasil["lon"] = lon
+    except Exception:
+        pass
+
+    return hasil
+
+
+def _isi_otomatis_dari_exif(raw_bytes: bytes):
+    """Coba persingkat input mode "Ukur dari Foto": isi lat/lon/tanggal/jam
+    otomatis dari EXIF foto yang baru diunggah. Dipanggil SEKALI tiap ada
+    foto baru (lihat pemanggilnya) — tidak menimpa perubahan manual pengguna
+    di rerun-rerun berikutnya. Kalau EXIF tidak punya info itu (umum), tidak
+    melakukan apa-apa selain kasih tahu, dan alur input manual/GPS-browser
+    yang sudah ada tetap berfungsi seperti biasa."""
+    info = baca_exif_foto(raw_bytes)
+    if not info:
+        st.session_state["ukur_exif_pesan"] = (
+            "info",
+            "Metadata (lokasi/waktu) tidak ditemukan di foto ini — umum "
+            "terjadi kalau file sudah lewat kompresi WhatsApp/medsos, atau "
+            "izin lokasi kamera tidak aktif saat memotret. Isi manual di "
+            "atas, atau centang '📡 Deteksi lokasi otomatis (GPS)' di "
+            "sidebar (pakai lokasi browser SEKARANG, bukan lokasi saat foto "
+            "diambil — hanya cocok kalau Anda mengunggah dari lokasi yang "
+            "sama)."
+        )
+        return
+
+    berubah = []
+    if "lat" in info and "lon" in info:
+        berubah.append(f"lokasi ({info['lat']:.5f}, {info['lon']:.5f})")
+    if "tanggal" in info:
+        berubah.append(f"tanggal ({info['tanggal'].strftime('%d-%m-%Y')})")
+    if "jam" in info:
+        berubah.append(f"jam potret ({info['jam'].strftime('%H:%M:%S')})")
+    if not berubah:
+        return
+
+    # PENTING: tidak boleh langsung menulis ke session_state milik widget yang
+    # SUDAH dibuat di run ini (lat_d, the_date, ukur_hm semua sudah
+    # terinstansiasi lebih dulu sebelum titik ini tercapai — Streamlit
+    # melarang menulis ke session_state widget setelah ia dibuat pada run
+    # yang sama). Simpan dulu sebagai "pending"; baru diterapkan di AWAL
+    # sidebar_inputs() / seksi waktu potret pada run berikutnya, sebelum
+    # widget-widget itu dibuat lagi — lihat _terapkan_exif_pending_lokasi()
+    # dan _terapkan_exif_pending_jam().
+    st.session_state["ukur_exif_pending"] = info
+    st.session_state["ukur_exif_pesan"] = (
+        "success",
+        "📸 Terbaca dari metadata foto, otomatis diisikan: " +
+        ", ".join(berubah) + ". Periksa dulu di atas sebelum lanjut — "
+        "ubah manual kalau ada yang keliru (mis. GPS HP memang bisa "
+        "meleset beberapa meter, tidak masalah untuk arah Kiblat; tapi "
+        "jam potret sebaiknya tepat)."
+    )
+    st.rerun()
+
+
+def _terapkan_exif_pending_lokasi():
+    """Terapkan bagian lokasi/tanggal dari EXIF pending. Dipanggil di AWAL
+    sidebar_inputs(), SEBELUM widget lat/lon/tanggal dibuat — TIDAK
+    membersihkan pending (bagian jam masih perlu dipakai belakangan oleh
+    _terapkan_exif_pending_jam, yang jadi pemakai terakhir dan membersihkan)."""
+    info = st.session_state.get("ukur_exif_pending")
+    if not info:
+        return
+    if "lat" in info and "lon" in info:
+        _set_coord_state(info["lat"], info["lon"])
+    if "tanggal" in info:
+        st.session_state["the_date"] = info["tanggal"]
+
+
+def _terapkan_exif_pending_jam():
+    """Terapkan bagian jam dari EXIF pending. Dipanggil di awal seksi 'waktu
+    potret' render_ukur_foto(), SEBELUM widget ukur_hm/ukur_sec dibuat. Ini
+    pemakai terakhir dari 'ukur_exif_pending' — sekalian dibersihkan di sini."""
+    info = st.session_state.pop("ukur_exif_pending", None)
+    if not info or "jam" not in info:
+        return
+    st.session_state["ukur_hm"] = info["jam"].replace(second=0, microsecond=0)
+    st.session_state["ukur_sec"] = info["jam"].second
+
+
+def _catat_log_ukur(row: dict):
+    """Tambah satu baris ke log_ukur_cv.csv (dibuat kalau belum ada).
+
+    Sengaja dipisah dari log_foto_bayangan.csv yang sudah ada di repo — file
+    itu skemanya untuk pencatatan MANUAL (baca_busur_manual_deg, kondisi_langit
+    isian tangan), makna kolomnya beda dari hasil otomatis CV di sini. Lebih
+    jujur punya berkas sendiri daripada memaksakan ke skema yang tidak cocok.
+    """
+    baru = not os.path.exists(LOG_UKUR_CV)
+    with open(LOG_UKUR_CV, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=LOG_UKUR_CV_HEADER)
+        if baru:
+            w.writeheader()
+        w.writerow({k: row.get(k, "") for k in LOG_UKUR_CV_HEADER})
+
+
+def _reset_klik():
+    for k in ("ukur_titik_B", "ukur_titik_ref"):
+        st.session_state.pop(k, None)
+
+
+def render_ukur_foto(inp, ref):
+    st.caption(
+        "Foto papan kalibrasi ChArUco (v2, dengan titik gnomon O tetap tercetak "
+        "+ skala tepi) beserta bayangannya, lalu tandai **satu titik**: ujung "
+        "bayangan. Titik pangkal (O) tidak perlu ditandai — posisinya sudah "
+        "diketahui dari cetakan. Aplikasi menghitung arah Kiblat lewat homografi "
+        "papan — tidak perlu Utara sejati, tidak perlu busur derajat fisik — dan "
+        "menunjukkan di tepi mana serta angka berapa untuk menandai garis Kiblat "
+        "secara fisik."
+    )
+
+    # --- 1. Unggah foto DULU (foto asli kamera biasanya bawa metadata GPS +
+    # jam potret di EXIF-nya) — supaya kalau metadata itu ada, langkah waktu
+    # & lokasi di bawah otomatis terisi dan tidak perlu diisi manual dulu
+    # sebelum sempat unggah.
+    unggahan = st.file_uploader("📸 Foto papan + bayangan (file ASLI kamera, "
+                                "bukan hasil kompresi WhatsApp)",
+                                type=["jpg", "jpeg", "png"])
+    if unggahan is None:
+        st.info("Unggah foto untuk melanjutkan — kalau file asli kamera (bukan "
+                 "hasil forward WhatsApp), lintang/bujur/tanggal/jam di bawah "
+                 "akan dicoba diisi otomatis dari metadata foto.")
+        return
+
+    if st.session_state.get("ukur_nama_file") != unggahan.name:
+        st.session_state["ukur_nama_file"] = unggahan.name
+        _reset_klik()
+        _isi_otomatis_dari_exif(unggahan.getvalue())
+
+    pesan_exif = st.session_state.pop("ukur_exif_pesan", None)
+    if pesan_exif:
+        {"success": st.success, "info": st.info}[pesan_exif[0]](pesan_exif[1])
+
+    arr = np.frombuffer(unggahan.getvalue(), np.uint8)
+    img_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img_bgr is None:
+        st.error("Berkas tidak terbaca sebagai gambar.")
+        return
+
+    # --- 2. Gerbang mutu otomatis (cek foto dulu sebelum minta apa-apa lagi) ---
+    hasil_mutu = pc.cek_foto_ukur(img_bgr, verbose=False)
+    vonis = hasil_mutu.get("vonis", "ULANGI")
+    warna = {"AMAN": st.success, "SEDANG": st.warning, "ULANGI": st.error}[vonis]
+    warna(f"**{vonis}** — {hasil_mutu.get('alasan', '')}")
+    if "bias_deg" in hasil_mutu:
+        st.caption(f"Bias sudut perkiraan: {hasil_mutu['bias_deg']:.3f}° · "
+                   f"papan mengisi {hasil_mutu['isi_frame']*100:.0f}% lebar frame · "
+                   f"{hasil_mutu.get('sumber','')}")
+    if vonis == "ULANGI":
+        st.stop()
+
+    # --- 3. Waktu potret (kalau ada di EXIF, sudah otomatis dari langkah 1;
+    # kalau tidak ada, isi manual di sini) ---
+    st.divider()
+    _terapkan_exif_pending_jam()  # sebelum widget ukur_hm/ukur_sec dibuat
+    tz = dt.timezone(dt.timedelta(hours=inp["tz_offset"]))
+    is_today = inp["the_date"] == user_today(inp["tz_offset"])
+    if "ukur_hm" not in st.session_state:
+        now_t = dt.datetime.now(tz).time() if is_today else dt.time(12, 0, 0)
+        st.session_state["ukur_hm"] = now_t.replace(second=0, microsecond=0)
+        st.session_state["ukur_sec"] = now_t.second if is_today else 0
+
+    def _set_now_ukur():
+        now_t2 = dt.datetime.now(tz).time()
+        st.session_state["ukur_hm"] = now_t2.replace(second=0, microsecond=0)
+        st.session_state["ukur_sec"] = now_t2.second
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+    c1.time_input("⏱️ Waktu potret", key="ukur_hm", step=60)
+    c2.number_input("Detik", 0, 59, key="ukur_sec")
+    c3.button("🔄 Sekarang", width="stretch", help="Isi waktu saat ini",
+             on_click=_set_now_ukur, key="btn_now_ukur")
+
+    t = st.session_state["ukur_hm"].replace(second=int(st.session_state["ukur_sec"]))
+    dt_local = dt.datetime.combine(inp["the_date"], t, tzinfo=tz)
+
+    ensure_ephemeris()
+    try:
+        out = qc.solve_instant(inp["lat"], inp["lon"], inp["elev"], dt_local, inp["height"])
+    except Exception as e:  # noqa: BLE001
+        st.error(f"Kesalahan perhitungan: {e}")
+        return
+    a_k, sol, arah = out["a_k"], out["solution"], out["arah"]
+
+    if sol.sun_altitude <= 0:
+        st.warning("☾ Matahari di bawah ufuk pada waktu potret ini — tidak ada "
+                   "bayangan. Perbaiki jam potret di atas.")
+        return
+
+    d1, d2 = st.columns(2)
+    d1.metric("ΔA target (dari perhitungan)", f"{sol.delta_a:.3f}° ke {arah.upper()}")
+    d2.metric("Altitude Matahari saat itu", qc.decimal_to_dms(sol.sun_altitude, "alt"))
+
+    # Peringatan kualitas altitude — informasional di alur foto (fotonya sudah
+    # diambil), tapi tetap berguna sebagai sinyal seberapa jauh dipercaya hasil
+    # §7.3 di bawah, dan pengingat untuk sesi pemotretan berikutnya.
+    if sol.sun_altitude < 10:
+        st.warning("Altitude rendah: bayangan panjang & ujung kabur (penumbra "
+                   "melebar). Pertimbangkan waktu lain untuk sesi berikutnya.")
+    elif sol.sun_altitude > 65:
+        st.warning(
+            f"Altitude tinggi ({sol.sun_altitude:.0f}°): bayangan akan pendek — "
+            "juga memperbesar dampak kemiringan gnomon (galat ≈ kemiringan × "
+            "tan(altitude)). Kalau bisa, pilih jam dengan altitude 15°-60° "
+            "untuk sesi berikutnya."
+        )
+    else:
+        st.success("Altitude cukup ideal untuk pengukuran bayangan (±15°–60°).")
+
+    # --- 4. Data alat ---
+    st.divider()
+    e1, e2 = st.columns(2)
+    tinggi_gnomon = e1.number_input("Tinggi gnomon di papan (meter)", min_value=0.01,
+                                    value=0.10, step=0.01, format="%.3f")
+    kotak_mm = e2.number_input("Sisi kotak papan — HASIL UKUR nyata (mm)",
+                               min_value=1.0, value=float(pc.SQUARE_MM), step=0.1,
+                               help="Ukur dengan penggaris/jangka sorong setelah "
+                                    "dicetak. Jangan biarkan nilai bawaan kalau "
+                                    "cetakan tidak 100% actual size.")
+
+    # --- 5. Rektifikasi ortho + penandaan titik ---
+    st.divider()
+    _, board, _, det = pc.build_detector()
+    cc, ci = hasil_mutu["_cc"], hasil_mutu["_ci"]
+    try:
+        ortho_bgr, meta = pc.rectify_ortho(img_bgr, cc, ci, board)
+    except ValueError as e:
+        st.error(str(e))
+        st.stop()
+
+    px_per_mm = meta["px_per_mm"]
+    r_marker = max(int(px_per_mm * 2), 4)
+    O_px = pc.mm_ke_px_ortho(np.array(pc.GNOMON_TETAP_MM, dtype=float), meta)
+
+    def _tampilan(dgn_B=None):
+        vis = ortho_bgr.copy()
+        cv2.circle(vis, tuple(O_px.astype(int)), r_marker, (0, 0, 220), 2)
+        cv2.drawMarker(vis, tuple(O_px.astype(int)), (0, 0, 220),
+                       cv2.MARKER_CROSS, r_marker * 2, 2)
+        if dgn_B is not None:
+            cv2.circle(vis, tuple(np.array(dgn_B).astype(int)), r_marker, (0, 140, 0), -1)
+        return Image.fromarray(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))
+
+    if "ukur_titik_B" not in st.session_state:
+        st.info("🖱️ Titik **O** (tanda silang biru) sudah otomatis di posisi gnomon "
+                "tetap. Klik **ujung bayangan** (titik terjauh bayangan gnomon) "
+                "pada gambar di bawah — atau coba tombol deteksi otomatis dahulu.")
+
+        # --- Tahap 1 (eksperimental): deteksi otomatis, klik tetap jadi koreksi ---
+        colb1, colb2 = st.columns([1, 2])
+        if colb1.button("🤖 Coba deteksi otomatis", key="btn_auto_B"):
+            auto = pc.deteksi_otomatis_bayangan(ortho_bgr, meta, np.array(pc.GNOMON_TETAP_MM, dtype=float))
+            if not auto["yakin"]:
+                colb2.error("Tidak ketemu objek gelap yang menempel di titik O — "
+                            "klik manual di bawah.")
+            else:
+                st.session_state["ukur_titik_B"] = auto["tip_px"]
+                if auto["pakai_warna"]:
+                    st.session_state["ukur_auto_pesan"] = (
+                        "success",
+                        f"Gnomon berwarna terdeteksi ({auto['n_piksel_gnomon']} px) dan "
+                        f"disingkirkan — ujung bayangan diambil dari sisa piksel netral "
+                        f"({auto['n_piksel_bayangan']} px)."
+                    )
+                else:
+                    st.session_state["ukur_auto_pesan"] = (
+                        "warning",
+                        "Gnomon TIDAK terdeteksi berwarna (foto lama / gnomon polos) — "
+                        "titik diambil dari ujung terjauh objek gelap apa adanya "
+                        "(gnomon+bayangan tercampur). Periksa & koreksi manual kalau "
+                        "meleset."
+                    )
+                st.rerun()
+        colb2.caption("Eksperimental — masih perlu diperiksa manual. Kerja lebih baik "
+                      "kalau gnomon dicat warna marun/magenta TUA (lihat "
+                      "`papan_charuco.GNOMON_HSV_LO/HI`).")
+
+        koor = streamlit_image_coordinates(_tampilan(), key="klik_B")
+        if koor is not None:
+            st.session_state["ukur_titik_B"] = (koor["x"], koor["y"])
+            st.session_state.pop("ukur_auto_pesan", None)
+            st.rerun()
+        return
+
+    pesan_auto = st.session_state.pop("ukur_auto_pesan", None)
+    if pesan_auto:
+        {"success": st.success, "warning": st.warning}[pesan_auto[0]](pesan_auto[1])
+
+    # --- 6. Hasil ---
+    B_px = np.array(st.session_state["ukur_titik_B"], dtype=float)
+    # Skala ortho dihitung dari SQUARE_MM bawaan; kalau ukuran kotak hasil ukur
+    # nyata beda, seluruh jarak metrik (mm) di ortho ikut dikoreksi rasio ini.
+    rasio_skala = kotak_mm / pc.SQUARE_MM
+    O_mm = np.array(pc.GNOMON_TETAP_MM, dtype=float) * rasio_skala
+    B_mm = pc.px_ortho_ke_mm(B_px, meta) * rasio_skala
+
+    hasil = pc.hitung_pengukuran(O_mm, B_mm, sol.delta_a, arah,
+                                 tinggi_gnomon, sol.sun_altitude)
+
+    # gambar overlay memakai koordinat ortho ASLI (bukan yang sudah dikoreksi
+    # rasio), supaya posisi piksel di layar tetap tepat; skala rasio hanya
+    # memengaruhi ANGKA (mm, altitude), bukan gambar.
+    O_mm_disp = np.array(pc.GNOMON_TETAP_MM, dtype=float)
+    B_mm_disp = pc.px_ortho_ke_mm(B_px, meta)
+    vis = pc.gambar_overlay(ortho_bgr, meta, O_mm_disp, B_mm_disp,
+                            hasil["v_kiblat_mm"], sol.delta_a, arah)
+    st.image(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB),
+            caption="Garis merah = bayangan terukur · garis hijau = arah Kiblat",
+            width="stretch")
+
+    f1, f2, f3 = st.columns(3)
+    f1.metric("Panjang bayangan", f"{hasil['panjang_bayangan_mm']:.1f} mm")
+    f2.metric("Altitude terukur (§7.3)", f"{hasil['altitude_terukur_deg']:.2f}°",
+             delta=f"{hasil['selisih_altitude_deg']:+.2f}° vs efemeris")
+    f3.metric("Validasi altitude", "✅ OK" if hasil["validasi_altitude_ok"] else "⚠️ Periksa")
+
+    # --- 6a. Petunjuk Pemasangan Fisik: baca satu angka di tepi papan ---
+    st.divider()
+    st.subheader("📐 Petunjuk Pemasangan Fisik")
+    potong = pc.titik_potong_tepi(O_mm_disp, hasil["v_kiblat_mm"])
+    if potong["sisi"] is None:
+        st.warning("Garis Kiblat tidak memotong tepi papan (arahnya nyaris "
+                   "sejajar tepi) — perbesar papan atau geser titik pengamatan.")
+    else:
+        st.success(
+            f"Baca di tepi **{potong['sisi'].upper()}** papan, pada angka "
+            f"**{potong['posisi_cm_str']} cm** dari pojok kiri-atas pola. "
+            "Tandai titik itu, lalu rentangkan tali kencang atau laser dari "
+            "situ melalui titik O — itulah garis Kiblat fisik, siap "
+            "diperpanjang sejauh yang dibutuhkan."
+        )
+        # crop-zoom di sekitar titik potong (dari citra ortho, bukan sekadar
+        # skema) supaya pengguna tinggal mencocokkan visual, bukan menghitung
+        # interpolasi sendiri antar goresan mm.
+        titik_potong_px = pc.mm_ke_px_ortho(potong["titik_mm"], meta)
+        zoom = pc.crop_zoom_titik(vis, meta, titik_potong_px, radius_px=70, skala_output=5)
+        st.image(cv2.cvtColor(zoom, cv2.COLOR_BGR2RGB),
+                caption=f"Perbesaran di sekitar titik potong ({potong['posisi_cm_str']} cm) "
+                        "— cocokkan tanda silang dengan goresan di papan fisik.",
+                width=380)
+
+    if not hasil["validasi_altitude_ok"]:
+        st.warning(
+            "Selisih altitude terukur vs efemeris melebihi ambang 0,5° — "
+            "kemungkinan papan tidak rata, gnomon tidak tegak, tinggi gnomon "
+            "salah diinput, atau kedua titik salah tandai. Periksa sebelum "
+            "memakai hasil ini."
+        )
+
+    # --- 6b. Opsional: bandingkan ke garis yang sudah terpasang ---
+    with st.expander("↔️ Bandingkan ke garis yang SUDAH ADA di lokasi (opsional)"):
+        st.caption(
+            "Kalau di lokasi ini sudah ada tanda arah (garis shaf, tanda kiblat "
+            "lama, dsb.) yang ikut terlihat di foto, klik satu titik di "
+            "sepanjang tanda itu (titik kedua dianggap sama dengan pangkal "
+            "gnomon O) untuk mengetahui berapa derajat koreksinya."
+        )
+        koor_ref = streamlit_image_coordinates(
+            _tampilan(dgn_B=B_px), key="klik_ref")
+        if koor_ref is not None:
+            st.session_state["ukur_titik_ref"] = (koor_ref["x"], koor_ref["y"])
+        ref_px = st.session_state.get("ukur_titik_ref")
+        selisih_ref = None
+        if ref_px is not None:
+            R_mm = pc.px_ortho_ke_mm(np.array(ref_px, dtype=float), meta)
+            v_ref = R_mm - O_mm_disp
+            v_kib = hasil["v_kiblat_mm"]
+            ang_ref = math.degrees(math.atan2(v_ref[1], v_ref[0]))
+            ang_kib = math.degrees(math.atan2(v_kib[1], v_kib[0]))
+            selisih_ref = ((ang_ref - ang_kib + 180) % 360) - 180
+            arah_koreksi = "KIRI" if selisih_ref > 0 else "KANAN"
+            st.metric("Garis terpasang meleset dari Kiblat",
+                     f"{abs(selisih_ref):.2f}° — putar ke {arah_koreksi}")
+
+    # --- 7. Simpan & log ---
+    st.divider()
+    catatan = st.text_input("Catatan (opsional)", "")
+    if st.button("💾 Simpan pengukuran ini ke log", type="primary"):
+        _catat_log_ukur({
+            "waktu_dicatat": dt.datetime.now(tz).isoformat(timespec="seconds"),
+            "nama_file": unggahan.name,
+            "lat": f"{inp['lat']:.6f}", "lon": f"{inp['lon']:.6f}",
+            "waktu_potret": dt_local.isoformat(timespec="seconds"),
+            "tinggi_gnomon_m": f"{tinggi_gnomon:.3f}",
+            "kotak_mm": f"{kotak_mm:.2f}",
+            "panjang_bayangan_mm": f"{hasil['panjang_bayangan_mm']:.1f}",
+            "delta_a_target_deg": f"{sol.delta_a:.3f}",
+            "arah": arah,
+            "altitude_efemeris_deg": f"{sol.sun_altitude:.3f}",
+            "altitude_terukur_deg": f"{hasil['altitude_terukur_deg']:.3f}",
+            "selisih_altitude_deg": f"{hasil['selisih_altitude_deg']:.3f}",
+            "validasi_altitude_ok": hasil["validasi_altitude_ok"],
+            "vonis_mutu_foto": vonis,
+            "bias_mutu_deg": f"{hasil_mutu.get('bias_deg', float('nan')):.3f}"
+                            if "bias_deg" in hasil_mutu else "",
+            "sisi_potong_tepi": potong.get("sisi") or "",
+            "posisi_potong_cm": potong.get("posisi_cm_str", ""),
+            "selisih_referensi_deg": (f"{selisih_ref:.3f}"
+                                      if selisih_ref is not None else ""),
+            "catatan": catatan,
+        })
+        st.success(f"Tersimpan ke {LOG_UKUR_CV}")
+
+    if st.button("🔁 Ukur foto lain / ulangi penandaan"):
+        _reset_klik()
+        st.rerun()
+
+
+# ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
 def _sig(inp):
@@ -851,7 +1370,17 @@ def main():
     st.caption("Penentu Arah Kiblat berbasis Matahari — Rashdul Qiblah Harian & "
                "Metode Selisih Azimuth · Skyfield + JPL DE440s · Koordinat Kakbah acuan Kemenag RI")
 
-    inp = sidebar_inputs()
+    # Mode dipilih DULU, sebelum sidebar dibangun — supaya sidebar tahu field
+    # mana yang relevan ditampilkan untuk mode ini (lihat sidebar_inputs()).
+    mode = st.radio(
+        "Mode pengukuran",
+        ["🗓️ Terjadwal (ΔA bulat — busur manual)",
+         "🎯 Bebas waktu (ΔA presisi — kamera/CV)",
+         "📷 Ukur dari Foto (ChArUco)"],
+        horizontal=True,
+    )
+
+    inp = sidebar_inputs(mode)
 
     # Penjaga akurasi: kecocokan zona waktu dengan bujur
     expected = inp["lon"] / 15.0
@@ -863,18 +1392,18 @@ def main():
     st.caption("🕐 Waktu eksekusi mengacu ke jam resmi **BMKG** (diselaraskan otomatis saat "
                "online). Jika offline, gunakan jam perangkat mode otomatis.")
 
-    mode = st.radio(
-        "Mode pengukuran",
-        ["🗓️ Terjadwal (ΔA bulat — busur manual)",
-         "🎯 Bebas waktu (ΔA presisi — kamera/CV)"],
-        horizontal=True,
-    )
-
     if mode.startswith("🎯"):
         st.metric("Azimuth Kiblat lokasi ini (A_k)",
                   qc.decimal_to_dms(qc.azimuth_kiblat(inp["lat"], inp["lon"]), "az"))
         st.divider()
         render_instant_mode(inp, get_time_reference())
+        return
+
+    if mode.startswith("📷"):
+        st.metric("Azimuth Kiblat lokasi ini (A_k)",
+                  qc.decimal_to_dms(qc.azimuth_kiblat(inp["lat"], inp["lon"]), "az"))
+        st.divider()
+        render_ukur_foto(inp, get_time_reference())
         return
 
     hitung = st.button(f"🔮 Hitung Waktu Kiblat — {tgl_id(inp['the_date'])}",

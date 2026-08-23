@@ -15,17 +15,26 @@ Thumbs.db
 .idea/
 .vscode/
 
-<<<<<<< HEAD
-=======
 # Berkas sementara/kunci Microsoft Office
 ~$*
 
 # Modul praktikum (dokumen terpisah, tidak disertakan ke repo kode)
 Modul Praktikum Arah Kiblat.docx
 
->>>>>>> 645ddf1 (Aplikasi Arah Kiblat Easy)
 # Efemeris: TIDAK di-commit (push 32 MB sering timeout di koneksi lambat).
 # Aplikasi mengunduhnya OTOMATIS saat pertama jalan di server (Streamlit Cloud).
 de440s.bsp
 de440.bsp
 de441.bsp
+
+# Log pengukuran pribadi (data lokasi/waktu personal, bukan bagian aplikasi)
+log_foto_bayangan.csv
+log_ukur_cv.csv
+
+# Foto lapangan pribadi (dokumentasi uji coba, bukan bagian aplikasi)
+foto_lapangan_v2_23agu/
+
+# Dokumen kerja terpisah (bukan bagian source code aplikasi)
+ABSTRAK_ALICIA2026.md
+Laporan_Rekomendasi_Jurnal_BayangKiblat.pdf
+tinjauan-literatur-cv-kiblat.docx

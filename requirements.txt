@@ -6,3 +6,5 @@ pandas>=2.0
 ntplib>=0.4.0
 fpdf2>=2.7
 streamlit-js-eval>=0.1.7
+opencv-contrib-python-headless>=4.8
+streamlit-image-coordinates>=0.4.0

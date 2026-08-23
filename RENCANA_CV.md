@@ -182,7 +182,167 @@ menjadi komponen wajib, bukan pelengkap.
 
 ---
 
-## 7. Rencana bertahap
+## 7. Ide pengembangan lanjutan (dikerjakan SETELAH Tahap 0–2 di §8 selesai)
+
+> **Urutan kerja — jangan dibalik.** Sub-bagian di bawah ini (§7.1–§7.3) adalah
+> **penyempurnaan presisi/keandalan**, bukan prasyarat. Baru dikerjakan setelah
+> pipeline satu-frame dasar berjalan DAN sudah divalidasi ke theodolit
+> (Tahap 1–2, §8) — kecuali §7.3 yang justru berguna DIKERJAKAN BERSAMAAN
+> dengan Tahap 2 sebagai kontrol mutu data validasi itu sendiri. Mengerjakan
+> §7.1/§7.2 lebih dulu berisiko menghabiskan waktu untuk penyempurnaan sebelum
+> fondasinya sendiri terbukti benar.
+
+### 7.1 Normalisasi latar berpola (papan ChArUco) sebelum fitting tepi bayangan
+
+**Gagasan** (dari diskusi 2 Agustus 2026): bayangan gnomon di lapangan jatuh
+melintasi papan ChArUco yang berpola kotak hitam-putih + marker — bukan latar
+polos seperti asumsi literatur fitting tepi sub-piksel (Devernay, erf/sigmoid).
+Kalau tepi bayangan melintasi kotak hitam vs putih, profil kecerahannya
+tercampur antara efek bayangan dan efek pola papan, berisiko bias.
+
+**Status novelty (hasil penelusuran 2 Agustus 2026):** masalah umumnya —
+memisahkan iluminasi dari reflektansi pada latar bertekstur/berpola yang
+**tidak diketahui** (rumput, aspal, dst.) — adalah bidang riset aktif
+(*intrinsic image decomposition*) yang secara eksplisit masih diakui sebagai
+"tantangan signifikan", belum tuntas. Kasus kita lebih mudah dari itu karena
+polanya **diketahui persis** (papan yang kita cetak sendiri, dan homografinya
+sudah wajib dihitung untuk rektifikasi geometri) — ini analog *flat-field
+correction* yang mapan di astronomi/pencitraan industri. Kombinasi spesifik
+"papan kalibrasi bermarker dipakai ganda: kalibrasi geometri SEKALIGUS
+referensi normalisasi fotometri untuk fitting tepi bayangan sub-piksel" belum
+ditemukan padanannya di penelusuran ini — kandidat kontribusi paling kuat dari
+tiga ide yang dibahas 2 Agustus 2026.
+
+**Usulan langkah teknis:**
+1. Setelah homografi ChArUco dihitung (sudah wajib ada, Tahap 1), bangkitkan
+   peta reflektansi yang diharapkan dari pola papan yang diketahui presisi
+   (posisi & warna tiap kotak/marker dari spesifikasi cetak papan).
+2. Registrasi peta itu ke citra asli lewat homografi yang sama.
+3. Bagi (normalisasi) citra hasil foto dengan peta reflektansi tadi →
+   hasilnya sinyal "iluminasi murni" tanpa gangguan pola papan.
+4. Baru jalankan fitting erf/sigmoid sub-piksel (§3–4) di atas sinyal yang
+   sudah dinormalisasi ini.
+
+**Catatan jujur:** perlu diuji empiris — reflektansi tinta cetak & kertas
+nyata tidak pernah benar-benar biner/sempurna, dan interpleksi cahaya difus
+di sekitar tepi bayangan bisa menyisakan galat residual yang belum
+dikuantifikasi. Ini tetap kontribusi jenis "sintesis teknik + validasi
+empiris", bukan teori benar-benar baru — sama seperti §7.2 di bawah.
+
+---
+
+### 7.2 Burst averaging dengan constraint efemeris
+
+**Gagasan** (dari diskusi 2 Agustus 2026): alih-alih satu foto, ambil beberapa
+frame berurutan dalam jendela pendek (mis. 5 detik) dan gabungkan pembacaan
+sudutnya memakai laju perubahan azimuth bayangan yang **sudah diketahui** dari
+efemeris (bukan diestimasi dari citra) sebagai *constraint* saat menggabungkan
+frame — mirip Kalman filter fisis, bukan rata-rata buta.
+
+**Status novelty (jujur, hasil penelusuran 2 Agustus 2026):** prinsip umumnya
+sudah mapan di tiga bidang bertetangga, jadi **tidak** bisa diklaim sebagai
+teknik baru begitu saja:
+
+| Sudah ada | Konteks |
+|---|---|
+| Kalman filter + efemeris untuk smoothing posisi Matahari | *Micro sun sensor* berbasis CMOS (MDPI *Sensors*, 2019) |
+| Hybrid open-loop (prediksi efemeris) + closed-loop (sensor citra) | Solar tracker & heliostat — sudah puluhan tahun |
+| *Shift-and-add*: geser piksel sesuai lintasan yang sudah diprediksi, lalu tumpuk | Astrometri objek Tata Surya bergerak (asteroid, TNO) |
+| Rata-rata beberapa frame di sekitar titik prediksi dari model fisika | Blog pengukuran lintang via bayangan gnomon (informal, bukan jurnal) |
+
+**Yang masih berpeluang jadi kontribusi sah:** bukan algoritmanya (itu sudah
+mapan), tapi (a) penerapannya khusus untuk ekstraksi **satu sudut azimuth
+statis** dari burst singkat — beda dari tracking berkelanjutan (heliostat),
+deteksi objek bergerak (astrometri), atau panjang bayangan/lintang (blog di
+atas) — dan (b) karakterisasi empiris seberapa besar perbaikan presisi yang
+benar-benar didapat di kondisi lapangan nyata (latar bertekstur papan ChArUco,
+luar ruang, bukan lab). Ini kontribusi jenis "sintesis teknik + validasi
+empiris", bukan "algoritma baru" — **wajib** mengutip literatur heliostat/
+sun-sensor/astrometri di atas secara eksplisit di naskah, supaya tidak
+terkesan tidak tahu literatur yang relevan.
+
+**Kaitan dengan analemma:** laju perubahan azimuth yang dipakai sebagai
+constraint dihitung dari model efemeris presisi tinggi (skyfield/DE440s, sudah
+dipakai `qibla_core.py`) — bukan dari rumus sundial sederhana yang butuh
+koreksi *equation of time* terpisah. Karena itu efek analemma (variasi ~±16
+menit antara waktu Matahari sejati dan waktu rata-rata sepanjang tahun)
+**otomatis sudah benar** tanpa perlu ditangani manual — ini justru keunggulan
+memakai efemeris presisi dibanding rumus sundial klasik. Analemma baru jadi
+relevan secara langsung kalau teknik ini diperluas ke rata-rata **antar-hari**
+(bukan cuma dalam satu burst beberapa detik) — misalnya menggabungkan data
+kalibrasi dari beberapa hari berdekatan — karena laju perubahan deklinasi
+Matahari berubah tidak linear di sekitar solstis. Untuk burst dalam hitungan
+detik pada satu hari yang sama, efek analemma bisa dianggap konstan (sudah
+"terbakukan" dalam satu angka laju azimuth saat itu), sehingga tidak perlu
+koreksi tambahan di dalam jendela burst itu sendiri.
+
+**Pustaka tambahan untuk ide ini** (belum ditinjau formal, baru hasil
+pencarian web 2 Agustus 2026):
+- Riset *micro sun sensor* berbasis CMOS + Kalman filter + data efemeris
+  Matahari (MDPI *Sensors*, 2019 — "Accurate and Cost-Effective Micro Sun
+  Sensor based on CMOS Black Sun Effect").
+- Kontrol heliostat *closed-loop* berbasis citra + prediksi efemeris
+  (*Solar Energy* / ScienceDirect — "Closed loop control of heliostats";
+  "Novel imaging closed loop control strategy for heliostats").
+- Teknik *shift-and-add* astrometri untuk objek Tata Surya bergerak dengan
+  lintasan yang sudah diprediksi (arXiv, berbagai makalah survei TNO/objek
+  cislunar, mis. "Optical Survey for Cislunar Moving Objects Using Image
+  Stacking").
+
+**Kapan dikerjakan:** setelah pipeline satu-frame dasar (Tahap 1–2 di bawah)
+berhasil dan tervalidasi. Burst averaging adalah **penyempurnaan presisi**,
+bukan prasyarat — jangan dikerjakan lebih dulu dari pipeline dasarnya.
+
+---
+
+### 7.3 Validasi silang altitude dari panjang bayangan (redundansi tanpa alat tambahan)
+
+**Gagasan** (dari diskusi 2 Agustus 2026): pipeline saat ini hanya memakai
+AZIMUTH bayangan (arahnya) untuk menentukan arah Kiblat. Padahal dari foto
+yang sama, PANJANG bayangan bisa dipakai menghitung ALTITUDE Matahari secara
+independen lewat `tan(altitude) = tinggi_gnomon / panjang_bayangan`. Altitude
+ini bisa langsung dibandingkan dengan altitude yang diprediksi efemeris
+(skyfield/DE440s, sudah dihitung `qibla_core.py`) pada detik pengambilan
+foto — kalau selisihnya besar, itu sinyal ada kesalahan **fisik** (papan
+tidak rata, gnomon tidak tegak sempurna, tinggi gnomon terukur salah, atau
+waktu tidak sinkron), bukan sekadar derau pengukuran.
+
+**Status novelty (hasil penelusuran 2 Agustus 2026):** basis gnomonik-nya
+(altitude dari rasio tinggi/panjang bayangan) itu sangat klasik — dipakai
+sejak zaman kuno untuk menentukan lintang. Konsep membandingkan
+altitude+azimuth turunan-bayangan terhadap sumber independen sebagai
+pengecekan konsistensi juga sudah ada, tapi dipakai di ranah **forensik
+digital** (memverifikasi klaim waktu/lokasi sebuah foto lewat kecocokan
+posisi Matahari dari bayangannya). Belum ditemukan penerapannya sebagai
+**fitur jaminan mutu real-time** pada instrumen pengukuran arah Kiblat —
+kandidat kontribusi kecil tapi jujur dan mudah diverifikasi.
+
+**Usulan langkah teknis:**
+1. Setelah garis & panjang bayangan terukur dari bidang papan/tanah (§3).
+2. Hitung `altitude_terukur = arctan(tinggi_gnomon / panjang_bayangan)`.
+3. Bandingkan dengan `altitude_efemeris` pada detik pengambilan foto.
+4. Selisih di luar ambang (mis. >0,5°, sesuai galat gnomonik dasar) →
+   peringatan otomatis: "Validasi altitude gagal — periksa ketegakan gnomon /
+   kerataan papan / tinggi gnomon yang diinput / sinkronisasi waktu."
+5. Selisih dalam ambang → tampilkan sebagai indikator kepercayaan tambahan
+   ("✓ Konsistensi altitude terverifikasi") mendampingi hasil azimuth.
+
+**Manfaat:** validasi ini **gratis** — dari foto yang sama yang sudah diambil
+untuk azimuth, tanpa alat atau langkah tambahan di lapangan. Cocok jadi fitur
+QA otomatis di aplikasi (Tahap 3) sekaligus kontrol mutu data saat
+pengumpulan data theodolit (Tahap 2) — dua manfaat sekaligus dari satu
+perhitungan tambahan yang murah.
+
+**Pustaka terkait:**
+- Gnomonik dasar altitude dari rasio gnomon/bayangan: mis. *Determining Your
+  Latitude with a Gnomon* (catatan kuliah, Kevin Krisciunas, Texas A&M).
+- Cross-check altitude+azimuth bayangan vs sumber independen: literatur
+  forensik verifikasi foto, mis. *Validating the Contextual Information of
+  Outdoor Images for Photo Misuse Detection* (arXiv:1811.08951).
+
+---
+
+## 8. Rencana bertahap
 
 ### Tahap 0 — Persiapan (langsung bisa dikerjakan)
 - Tambah `st.camera_input()` untuk dokumentasi foto pada laporan PDF.
@@ -195,12 +355,19 @@ menjadi komponen wajib, bukan pelengkap.
 - Pipeline: undistort → deteksi ChArUco → homografi → ROI bayangan →
   fitting profil tepi sub-piksel → TLS garis → sudut.
 - Uji pada foto sintetis (kebenaran acuan diketahui) sebelum foto nyata.
+- Penyempurnaan opsional setelah pipeline dasar jalan **dan** tervalidasi di
+  Tahap 2: normalisasi latar berpola (§7.1) dan *burst averaging* dengan
+  constraint efemeris (§7.2) — lihat §7 untuk gagasan, status novelty, dan
+  kaitan §7.2 dengan analemma. Jangan dikerjakan sebelum Tahap 1–2 selesai.
 
 ### Tahap 2 — Validasi lapangan
 - Bandingkan CV vs busur manual vs **theodolit** (acuan) pada ≥30 pengukuran,
   beragam altitude (15°–60°), beragam kamera HP dan kondisi cahaya.
 - Analisis: bias, simpangan baku, dekomposisi sumber galat, Bland–Altman.
 - Ini bagian yang mengubah proyek rekayasa menjadi **penelitian**.
+- Aktifkan validasi silang altitude dari panjang bayangan (§7.3) SELAMA
+  pengumpulan data ini — dipakai sebagai kontrol mutu tiap sesi pengukuran,
+  bukan ditunda ke tahap berikutnya.
 
 ### Tahap 3 — Integrasi aplikasi
 - Alur: pilih waktu → hitung mundur → jepret → hasil sudut + garis Kiblat
@@ -217,7 +384,7 @@ Kandidat kontribusi, diurutkan dari yang paling kuat:
 
 ---
 
-## 8. Risiko dan batasan (jujur)
+## 9. Risiko dan batasan (jujur)
 
 - **Ini proyek nyata, bukan tempelan fitur.** Tahap 1–2 realistis memakan
   waktu berbulan-bulan, bukan sore-ini-jadi-besok.
