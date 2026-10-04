@@ -1107,7 +1107,17 @@ def render_ukur_foto(inp, ref):
                    f"papan mengisi {hasil_mutu['isi_frame']*100:.0f}% lebar frame · "
                    f"{hasil_mutu.get('sumber','')}")
     if vonis == "ULANGI":
-        st.stop()
+        bias = hasil_mutu.get("bias_deg", float("nan"))
+        bias_lolos = (isinstance(bias, float) and math.isfinite(bias)
+                      and bias <= pc.AMBANG_ULANG)
+        if not bias_lolos:
+            # papan tak terdeteksi / bias sudut di atas ambang -> memang harus ulang
+            st.stop()
+        st.info(f"Bias sudut ({bias:.3f}°) masih di bawah ambang "
+                f"{pc.AMBANG_ULANG}°, jadi geometri foto tetap bisa dipakai. "
+                "Peringatan di atas hanya soal kondisi foto.")
+        if not st.checkbox("Tetap lanjutkan dengan foto ini", key="ukur_paksa_lanjut"):
+            st.stop()
 
     # --- 3. Waktu potret (kalau ada di EXIF, sudah otomatis dari langkah 1;
     # kalau tidak ada, isi manual di sini) ---
