@@ -37,6 +37,11 @@ from streamlit_image_coordinates import streamlit_image_coordinates
 from streamlit_js_eval import get_geolocation
 
 import papan_charuco as pc
+import importlib as _importlib
+# Streamlit Cloud tidak selalu memuat ulang modul lokal setelah git push;
+# paksa reload bila versi modul di memori tidak sama dengan yang diharapkan.
+if getattr(pc, "VERSI_MODUL", None) != "2026-10-04-template":
+    pc = _importlib.reload(pc)
 import qibla_core as qc
 
 LOG_UKUR_CV = "log_ukur_cv.csv"
@@ -1219,13 +1224,26 @@ def render_ukur_foto(inp, ref):
         # --- Tahap 1 (eksperimental): deteksi otomatis, klik tetap jadi koreksi ---
         colb1, colb2 = st.columns([1, 2])
         if colb1.button("🤖 Coba deteksi otomatis", key="btn_auto_B"):
-            auto = pc.deteksi_otomatis_bayangan(ortho_bgr, meta, np.array(pc.GNOMON_TETAP_MM, dtype=float))
+            _alt_ef = max(float(sol.sun_altitude), 1.0)
+            _L_pred = tinggi_gnomon * 1000.0 / math.tan(math.radians(_alt_ef))
+            auto = pc.deteksi_otomatis_bayangan(ortho_bgr, meta, np.array(pc.GNOMON_TETAP_MM, dtype=float),
+                                                L_pred_mm=_L_pred)
             if not auto["yakin"]:
                 colb2.error("Tidak ketemu objek gelap yang menempel di titik O — "
                             "klik manual di bawah.")
             else:
                 st.session_state["ukur_titik_B"] = auto["tip_px"]
-                if auto["pakai_warna"]:
+                if auto.get("metode") == "template":
+                    _pesan = (f"Bayangan terdeteksi dengan metode template papan "
+                              f"(arah {auto['theta_bayangan_deg']:.2f}°, panjang "
+                              f"{auto['panjang_mm']:.1f} mm); citra gnomon dikenali "
+                              f"dan diabaikan. Periksa titik hijau sebelum lanjut.")
+                    if auto.get("peringatan"):
+                        st.session_state["ukur_auto_pesan"] = (
+                            "warning", _pesan + " ⚠️ " + "; ".join(auto["peringatan"]))
+                    else:
+                        st.session_state["ukur_auto_pesan"] = ("success", _pesan)
+                elif auto["pakai_warna"]:
                     st.session_state["ukur_auto_pesan"] = (
                         "success",
                         f"Gnomon berwarna terdeteksi ({auto['n_piksel_gnomon']} px) dan "
@@ -1241,6 +1259,7 @@ def render_ukur_foto(inp, ref):
                         "meleset."
                     )
                 st.rerun()
+        colb2.caption(f"Modul deteksi: {getattr(pc, 'VERSI_MODUL', 'lama')}")
         colb2.caption("Eksperimental — masih perlu diperiksa manual. Kerja lebih baik "
                       "kalau gnomon dicat warna marun/magenta TUA (lihat "
                       "`papan_charuco.GNOMON_HSV_LO/HI`).")

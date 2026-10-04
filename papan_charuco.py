@@ -30,6 +30,7 @@ import cv2
 import numpy as np
 
 # --- HARUS SESUAI PAPAN YANG DICETAK -----------------------------------------
+VERSI_MODUL = "2026-10-04-template"   # dicek app.py; ganti tiap ubah modul
 SQUARE_MM = 30.0
 MARKER_MM = 22.0
 NX, NY = 6, 7
@@ -506,7 +507,196 @@ GNOMON_HSV_LO = np.array([140, 60, 20])
 GNOMON_HSV_HI = np.array([175, 255, 130])
 
 
-def deteksi_otomatis_bayangan(ortho_bgr, meta, O_mm, radius_cari_mm: float = 200.0,
+# --- Deteksi bayangan berbasis TEMPLATE papan (2026-10-04) --------------------
+# Masalah yang diperbaiki: gnomon tegak TIDAK berada di bidang papan, sehingga
+# di citra ortho ia tampak sebagai guratan memanjang dari O (efek perspektif).
+# Guratan itu punya piksel gelap, sehingga metode "objek gelap terjauh dari O"
+# bisa mengikuti GNOMON, bukan bayangannya (kasus nyata: foto Bojong, gnomon
+# baut logam polos -> garis merah mengikuti baut, salah ~125 deg).
+#
+# Dasar fisika metode ini: bayangan HANYA MENGGELAPKAN papan, merata, di kotak
+# putih maupun hitam. Gnomon (logam/cat) menghasilkan campuran piksel gelap
+# DAN terang (kilap). Maka citra dibandingkan dengan pola papan yang DIKETAHUI
+# (render ChArUco), dihitung peta penggelapan D = 1 - teramati/harapan, lalu
+# setiap arah dari O dinilai dari penggelapannya yang konsisten; arah yang
+# mengandung pencerahan (D < AMBANG_TERANG) ditolak sebagai benda, bukan bayangan.
+# Tidak memerlukan gnomon berwarna.
+
+AMBANG_TERANG = -0.10        # D di bawah ini = lebih terang dari kertas -> benda
+FRAKSI_TERANG_MAKS = 0.03    # arah dengan >3% piksel terang ditolak
+MIN_MARGIN_SKOR = 0.05       # selisih skor arah terbaik vs arah lain (>20 deg)
+MIN_PISAH_GNOMON_DEG = 20.0  # bayangan & citra gnomon terlalu berimpit -> ulangi
+TOL_PANJANG_EFEMERIS = 0.15  # |L - L_prediksi| / L_prediksi
+
+
+def peta_penggelapan(ortho_bgr, meta, board=None, sigma_mm: float = 10.0,
+                     erosi_mm: float = 1.0, sat_maks: int = 90):
+    """Peta D = 1 - abu2_teramati / abu2_harapan (bayangan > 0, kilap < 0).
+
+    Harapan dihitung terpisah untuk kotak putih dan hitam dari template papan,
+    dengan rata-rata lokal ternormalisasi (sigma ~ 1/3 kotak) sehingga
+    gradien pencahayaan ikut terkoreksi. NaN di tepi kotak (tepi cetak tidak
+    pernah pas sempurna), di luar papan, dan pada piksel berwarna jenuh
+    (overlay/teks berwarna)."""
+    if board is None:
+        _, board, _, _ = build_detector()
+    ppm, m = meta["px_per_mm"], meta["margin_mm"]
+    gray = cv2.cvtColor(ortho_bgr, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    sat = cv2.cvtColor(ortho_bgr, cv2.COLOR_BGR2HSV)[..., 1]
+    Wb, Hb = int(round(meta["W_mm"] * ppm)), int(round(meta["H_mm"] * ppm))
+    tpl = board.generateImage((Wb, Hb), marginSize=0, borderBits=1)
+    putih = np.zeros(gray.shape, np.uint8)
+    pada_papan = np.zeros(gray.shape, np.uint8)
+    x0 = y0 = int(round(m * ppm))
+    putih[y0:y0 + Hb, x0:x0 + Wb] = (tpl > 127)
+    pada_papan[y0:y0 + Hb, x0:x0 + Wb] = 1
+    hitam = pada_papan & (1 - putih)
+    r = max(int(round(erosi_mm * ppm)), 1)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * r + 1, 2 * r + 1))
+    sah = (sat < sat_maks) & (gray > 0)
+
+    def harapan(kelas):
+        msk = (cv2.erode(kelas, k) > 0) & sah
+        s = sigma_mm * ppm
+        num = cv2.GaussianBlur(np.where(msk, gray, 0).astype(np.float32), (0, 0), s)
+        den = cv2.GaussianBlur(msk.astype(np.float32), (0, 0), s)
+        return num / np.maximum(den, 1e-3), msk
+
+    Ep, mp = harapan(putih)
+    Eh, mh = harapan(hitam)
+    E = np.where(putih > 0, Ep, Eh)
+    return np.where(mp | mh, 1.0 - gray / np.maximum(E, 1.0), np.nan)
+
+
+def _deteksi_bayangan_template(ortho_bgr, meta, O_mm, L_pred_mm=None,
+                               board=None, r_min_mm: float = 6.0,
+                               celah_mm: float = 2.0) -> dict:
+    ppm, m = meta["px_per_mm"], meta["margin_mm"]
+    O = np.asarray(O_mm, dtype=float)
+    D = peta_penggelapan(ortho_bgr, meta, board)
+
+    def ambil(xmm, ymm):
+        xs = np.round((xmm + m) * ppm).astype(int)
+        ys = np.round((ymm + m) * ppm).astype(int)
+        ok = (xs >= 0) & (xs < D.shape[1]) & (ys >= 0) & (ys < D.shape[0])
+        v = np.full(np.shape(xmm), np.nan)
+        v[ok] = D[ys[ok], xs[ok]]
+        return v
+
+    def satuan(th):   # th: derajat searah jarum jam dari arah 'atas' papan (-y)
+        t = math.radians(th)
+        return np.array([math.sin(t), -math.cos(t)])
+
+    hasil = {"tip_mm": None, "tip_px": None, "yakin": False, "pakai_warna": False,
+             "ujung_ambang_ketat": False, "n_piksel_gnomon": 0,
+             "n_piksel_bayangan": 0, "metode": "template", "flags": [],
+             "mask_debug": np.clip(np.nan_to_num(D) * 400 + 128, 0, 255).astype(np.uint8)}
+
+    r_atas = 0.7 * L_pred_mm if (L_pred_mm and L_pred_mm > r_min_mm + 8) else 40.0
+    r = np.arange(r_min_mm, r_atas, 0.25)
+
+    # 1) pindai semua arah
+    skor, terang = [], []
+    for th in np.arange(0.0, 360.0, 0.5):
+        u = satuan(th)
+        v = ambil(O[0] + r * u[0], O[1] + r * u[1])
+        if np.mean(np.isnan(v)) > 0.3:
+            continue
+        f_terang = float(np.nanmean(v < AMBANG_TERANG))
+        terang.append((f_terang, th))
+        if f_terang > FRAKSI_TERANG_MAKS:
+            continue
+        skor.append((float(np.nanpercentile(v, 20)), th))
+    if not skor:
+        hasil["flags"].append("tidak ada arah yang menyerupai bayangan")
+        return hasil
+    skor.sort(reverse=True)
+    terbaik, th = skor[0]
+    lain = [s for s, a in skor if min(abs(a - th), 360 - abs(a - th)) > 20]
+    margin = terbaik - (lain[0] if lain else 0.0)
+
+    # 2) haluskan arah: titik berat penggelapan melintang bayangan
+    offs = np.arange(-6.0, 6.01, 0.25)
+    for _ in range(3):
+        u = satuan(th)
+        n = np.array([-u[1], u[0]])
+        sudut, bobot = [], []
+        for ri in np.arange(r_min_mm + 2, r[-1], 0.5):
+            p = O + ri * u
+            v = np.clip(np.nan_to_num(ambil(p[0] + offs * n[0], p[1] + offs * n[1])), 0, None)
+            if v.sum() > 1e-3:
+                sudut.append(math.degrees(math.atan2((v * offs).sum() / v.sum(), ri)))
+                bobot.append(ri)
+        if sudut:
+            th = (th + float(np.average(sudut, weights=bobot))) % 360
+
+    # 3) ujung = titik setengah-tingkat-gelap (tengah penumbra); NaN dilewati
+    u = satuan(th)
+    rr = np.arange(r_min_mm, 400.0, 0.25)
+    v = ambil(O[0] + rr * u[0], O[1] + rr * u[1])
+    tingkat = float(np.nanmedian(v[(rr > r_min_mm + 6) & (rr < r[-1])]))
+    akhir, bawah = None, 0.0
+    for ri, vi in zip(rr, v):
+        if ri < r_min_mm + 6 or np.isnan(vi):
+            continue
+        if vi > 0.5 * tingkat:
+            akhir, bawah = ri, 0.0
+        else:
+            bawah += 0.25
+            if bawah > celah_mm:
+                break
+    if akhir is None or not np.isfinite(tingkat) or tingkat <= 0:
+        hasil["flags"].append("ujung bayangan tidak ditemukan")
+        return hasil
+
+    B = O + akhir * u
+    arah_gnomon = max(terang)[1] if terang else None
+    pisah = None if arah_gnomon is None else min(abs(arah_gnomon - th), 360 - abs(arah_gnomon - th))
+
+    if margin < MIN_MARGIN_SKOR:
+        hasil["flags"].append("arah bayangan ambigu")
+    peringatan = []
+    # Arah yang dipilih sendiri sudah lolos uji kilap, jadi berdekatan dengan
+    # citra gnomon hanya PERINGATAN (periksa visual), bukan penolakan.
+    if pisah is not None and max(terang)[0] > 0.10 and pisah < MIN_PISAH_GNOMON_DEG:
+        peringatan.append("bayangan berdekatan dengan citra gnomon — periksa titik, "
+                          "atau potret lebih tegak dari atas")
+    if L_pred_mm and abs(akhir - L_pred_mm) / L_pred_mm > TOL_PANJANG_EFEMERIS:
+        peringatan.append(f"panjang bayangan {akhir:.1f} mm vs prediksi efemeris {L_pred_mm:.1f} mm")
+
+    tip_px = mm_ke_px_ortho(B, meta)
+    hasil.update({
+        "tip_mm": B, "tip_px": (int(round(tip_px[0])), int(round(tip_px[1]))),
+        "yakin": not hasil["flags"], "theta_bayangan_deg": th, "panjang_mm": akhir,
+        "tingkat_gelap": tingkat, "margin_skor": margin,
+        "arah_gnomon_deg": arah_gnomon, "pisah_gnomon_deg": pisah,
+        "peringatan": peringatan,
+    })
+    return hasil
+
+
+def deteksi_otomatis_bayangan(ortho_bgr, meta, O_mm, L_pred_mm=None, **kw) -> dict:
+    """Cari otomatis ujung bayangan (titik B).
+
+    Urutan: (1) metode TEMPLATE papan (tidak butuh gnomon berwarna, menolak
+    citra gnomon lewat kilapnya); bila gagal/ragu, (2) metode anomali-gelap
+    lama (`_deteksi_bayangan_anomali`, memakai pemisah warna gnomon bila ada).
+    `L_pred_mm` = tinggi_gnomon / tan(altitude efemeris), opsional tetapi
+    disarankan: mempersempit pencarian dan memberi peringatan bila panjang
+    bayangan tidak cocok."""
+    t = _deteksi_bayangan_template(ortho_bgr, meta, O_mm, L_pred_mm=L_pred_mm)
+    if t["yakin"]:
+        return t
+    lama = _deteksi_bayangan_anomali(ortho_bgr, meta, O_mm, **kw)
+    lama["metode"] = "anomali (cadangan)"
+    lama["flags"] = t["flags"]
+    lama["peringatan"] = []
+    return lama
+
+
+
+
+def _deteksi_bayangan_anomali(ortho_bgr, meta, O_mm, radius_cari_mm: float = 200.0,
                               ambang_anomali: int = 20, ambang_ujung: int = 45,
                               warna_lo=GNOMON_HSV_LO, warna_hi=GNOMON_HSV_HI) -> dict:
     """Cari otomatis ujung bayangan (titik B), menggantikan klik manual.
