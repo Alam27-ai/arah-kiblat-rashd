@@ -1074,6 +1074,18 @@ def render_ukur_foto(inp, ref):
         "secara fisik."
     )
 
+    # Papan cetak v2 (pola 6x7, titik O, skala mm di keempat tepi) — langkah
+    # pertama pemakaian adalah mencetaknya pada skala 100%.
+    _pdf_papan = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              "papan_charuco_A4_v2.pdf")
+    if os.path.exists(_pdf_papan):
+        with open(_pdf_papan, "rb") as _f:
+            st.download_button(
+                "📄 Unduh papan ChArUco v2 (PDF, A4)", _f.read(),
+                file_name="BayangKiblat_papan_A4_v2.pdf", mime="application/pdf",
+                help="Cetak 100% / 'Actual size' (JANGAN 'Fit to page'), lalu ukur "
+                     "sisi satu kotak dengan penggaris dan isikan di langkah 4.")
+
     # --- 1. Unggah foto DULU (foto asli kamera biasanya bawa metadata GPS +
     # jam potret di EXIF-nya) — supaya kalau metadata itu ada, langkah waktu
     # & lokasi di bawah otomatis terisi dan tidak perlu diisi manual dulu
