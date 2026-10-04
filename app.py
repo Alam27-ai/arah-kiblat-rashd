@@ -40,7 +40,7 @@ import papan_charuco as pc
 import importlib as _importlib
 # Streamlit Cloud tidak selalu memuat ulang modul lokal setelah git push;
 # paksa reload bila versi modul di memori tidak sama dengan yang diharapkan.
-if getattr(pc, "VERSI_MODUL", None) != "2026-10-04-template-geo":
+if getattr(pc, "VERSI_MODUL", None) != "2026-10-05-dms":
     pc = _importlib.reload(pc)
 import qibla_core as qc
 
@@ -859,7 +859,7 @@ def render_instant_mode(inp, ref):
 <div style="text-align:center;padding:18px;border-radius:16px;
             background:linear-gradient(135deg,#0e5c3f,#12805a);color:#fff;margin-bottom:10px;">
   <div style="font-size:15px;opacity:.85;letter-spacing:1px;">SUDUT PUTAR DARI BAYANGAN</div>
-  <div style="font-size:56px;font-weight:800;line-height:1.1;">{sol.delta_a:.3f}°</div>
+  <div style="font-size:56px;font-weight:800;line-height:1.1;">{qc.decimal_to_dms(sol.delta_a, "alt")}</div>
   <div style="font-size:17px;opacity:.9;">ke arah {arah.upper()} · {t.strftime('%H:%M:%S')} {inp['tz_short']} · {tgl_id(inp['the_date'])}</div>
 </div>
 """,
@@ -1108,7 +1108,7 @@ def render_ukur_foto(inp, ref):
     warna = {"AMAN": st.success, "SEDANG": st.warning, "ULANGI": st.error}[vonis]
     warna(f"**{vonis}** — {hasil_mutu.get('alasan', '')}")
     if "bias_deg" in hasil_mutu:
-        st.caption(f"Bias sudut perkiraan: {hasil_mutu['bias_deg']:.3f}° · "
+        st.caption(f"Bias sudut perkiraan: {qc.decimal_to_dms(hasil_mutu['bias_deg'], 'alt', 0)} · "
                    f"papan mengisi {hasil_mutu['isi_frame']*100:.0f}% lebar frame · "
                    f"{hasil_mutu.get('sumber','')}")
     if vonis == "ULANGI":
@@ -1118,8 +1118,8 @@ def render_ukur_foto(inp, ref):
         if not bias_lolos:
             # papan tak terdeteksi / bias sudut di atas ambang -> memang harus ulang
             st.stop()
-        st.info(f"Bias sudut ({bias:.3f}°) masih di bawah ambang "
-                f"{pc.AMBANG_ULANG}°, jadi geometri foto tetap bisa dipakai. "
+        st.info(f"Bias sudut ({qc.decimal_to_dms(bias, 'alt', 0)}) masih di bawah ambang "
+                f"{qc.decimal_to_dms(pc.AMBANG_ULANG, 'alt', 0)}, jadi geometri foto tetap bisa dipakai. "
                 "Peringatan di atas hanya soal kondisi foto.")
         if not st.checkbox("Tetap lanjutkan dengan foto ini", key="ukur_paksa_lanjut"):
             st.stop()
@@ -1163,7 +1163,7 @@ def render_ukur_foto(inp, ref):
         return
 
     d1, d2 = st.columns(2)
-    d1.metric("ΔA target (dari perhitungan)", f"{sol.delta_a:.3f}° ke {arah.upper()}")
+    d1.metric("ΔAₛ (dari garis bayangan)", f"{qc.decimal_to_dms(sol.delta_a, 'alt')} ke {arah.upper()}")
     d2.metric("Altitude Matahari saat itu", qc.decimal_to_dms(sol.sun_altitude, "alt"))
 
     # Peringatan kualitas altitude — informasional di alur foto (fotonya sudah
@@ -1235,7 +1235,7 @@ def render_ukur_foto(inp, ref):
                 st.session_state["ukur_titik_B"] = auto["tip_px"]
                 if auto.get("metode") == "template":
                     _pesan = (f"Bayangan terdeteksi dengan metode template papan "
-                              f"(arah {auto['theta_bayangan_deg']:.2f}°, panjang "
+                              f"(arah {qc.decimal_to_dms(auto['theta_bayangan_deg'], 'az')}, panjang "
                               f"{auto['panjang_mm']:.1f} mm); citra gnomon dikenali "
                               f"dan diabaikan. Periksa titik hijau sebelum lanjut.")
                     if auto.get("peringatan"):
@@ -1299,8 +1299,9 @@ def render_ukur_foto(inp, ref):
 
     f1, f2, f3 = st.columns(3)
     f1.metric("Panjang bayangan", f"{hasil['panjang_bayangan_mm']:.1f} mm")
-    f2.metric("Altitude terukur (§7.3)", f"{hasil['altitude_terukur_deg']:.2f}°",
-             delta=f"{hasil['selisih_altitude_deg']:+.2f}° vs efemeris")
+    f2.metric("Altitude terukur (§7.3)", qc.decimal_to_dms(hasil['altitude_terukur_deg'], 'alt'),
+             delta=("+" if hasil['selisih_altitude_deg'] >= 0 else "")
+                   + f"{qc.decimal_to_dms(hasil['selisih_altitude_deg'], 'alt')} vs efemeris")
     f3.metric("Validasi altitude", "✅ OK" if hasil["validasi_altitude_ok"] else "⚠️ Periksa")
 
     # --- 6a. Petunjuk Pemasangan Fisik: baca satu angka di tepi papan ---
@@ -1359,7 +1360,7 @@ def render_ukur_foto(inp, ref):
             selisih_ref = ((ang_ref - ang_kib + 180) % 360) - 180
             arah_koreksi = "KIRI" if selisih_ref > 0 else "KANAN"
             st.metric("Garis terpasang meleset dari Kiblat",
-                     f"{abs(selisih_ref):.2f}° — putar ke {arah_koreksi}")
+                     f"{qc.decimal_to_dms(abs(selisih_ref), 'alt')} — putar ke {arah_koreksi}")
 
     # --- 7. Simpan & log ---
     st.divider()

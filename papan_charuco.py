@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 # --- HARUS SESUAI PAPAN YANG DICETAK -----------------------------------------
-VERSI_MODUL = "2026-10-04-template-geo"   # dicek app.py; ganti tiap ubah modul
+VERSI_MODUL = "2026-10-05-dms"   # dicek app.py; ganti tiap ubah modul
 SQUARE_MM = 30.0
 MARKER_MM = 22.0
 NX, NY = 6, 7
@@ -438,7 +438,10 @@ def gambar_overlay(ortho_bgr, meta, O_mm, B_mm, v_kiblat_mm,
                    warna, tebal, cv2.LINE_AA)
 
     # label ΔA di dekat busur
-    _teks_latar(label_px, f"dA={delta_a_deg:.2f} {arah}", 0.55, (20, 20, 20))
+    # Font Hershey OpenCV hanya ASCII: derajat ditulis "d", menit ', detik ".
+    _tot = round(abs(delta_a_deg) * 3600)
+    _d, _m, _s = _tot // 3600, (_tot % 3600) // 60, _tot % 60
+    _teks_latar(label_px, f"dAs={_d}d{_m:02d}'{_s:02d}\" {arah}", 0.55, (20, 20, 20))
     # label ujung garis: didorong keluar sepanjang arah garis itu sendiri (bukan
     # offset piksel tetap) supaya tidak pernah menimpa garisnya sendiri
     dir_bay = (B_px - O_px).astype(float)
