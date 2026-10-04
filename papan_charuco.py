@@ -179,7 +179,8 @@ def cek_foto_ukur(path_or_array, verbose: bool = False) -> dict:
 
     out.update(sisa_px=sisa_px, radial_px=radial_px, r2_radial=r2,
                bias_deg=bias, isi_frame=span, off_center=off,
-               mm_per_px=mmpx, clip_pct=clip, gelap_pct=dark)
+               mm_per_px=mmpx, clip_pct=clip, gelap_pct=dark,
+               kontras=contrast)
 
     alasan = []
     if bias > AMBANG_ULANG:
@@ -190,8 +191,17 @@ def cek_foto_ukur(path_or_array, verbose: bool = False) -> dict:
     if off > 0.45:
         alasan.append(f"papan jauh dari pusat frame ({off:.2f}) — "
                       "distorsi lensa terbesar di tepi")
-    if not np.isnan(dark) and dark > 25:
-        alasan.append(f"{dark:.0f}% area papan gelap (ternaung sebagian)")
+    # Catatan: piksel <=40 di papan sebagian besar adalah kotak/marker hitam
+    # dan bayangan gnomon itu sendiri, jadi 'gelap_pct' bukan alasan ULANGI.
+    # Cahaya kurang yang benar-benar merusak deteksi akan menaikkan bias_deg;
+    # yang dijadikan gerbang keras hanya kontras yang sangat rendah.
+    catatan = []
+    if not np.isnan(contrast) and contrast < 60:
+        alasan.append(f"kontras papan sangat rendah ({contrast:.0f}/255) — "
+                      "foto terlalu gelap/berkabut, titik sudut tak andal")
+    elif not np.isnan(dark) and dark > 60:
+        catatan.append(f"{dark:.0f}% area papan gelap — cahaya kurang, "
+                       "hasil masih dipakai karena bias sudut lolos")
     if not np.isnan(clip) and clip > 2:
         alasan.append(f"{clip:.0f}% area papan jenuh silau")
     if not np.isnan(mmpx) and mmpx > 0.40:
@@ -200,10 +210,12 @@ def cek_foto_ukur(path_or_array, verbose: bool = False) -> dict:
 
     if alasan:
         out["vonis"] = "ULANGI"
-    elif bias > AMBANG_AMAN or span < 0.50:
+    elif bias > AMBANG_AMAN or span < 0.50 or catatan:
         out["vonis"] = "SEDANG"
-        alasan.append("layak dipakai, tapi bisa jauh lebih baik dengan "
-                      "mendekatkan kamera")
+        alasan.extend(catatan)
+        if bias > AMBANG_AMAN or span < 0.50:
+            alasan.append("layak dipakai, tapi bisa jauh lebih baik dengan "
+                          "mendekatkan kamera")
     else:
         out["vonis"] = "AMAN"
     out["alasan"] = "; ".join(alasan) if alasan else "semua kriteria terpenuhi"
