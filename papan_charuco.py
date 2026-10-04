@@ -632,8 +632,48 @@ def deteksi_otomatis_bayangan(ortho_bgr, meta, O_mm, radius_cari_mm: float = 200
 
     d = np.hypot(xs_final - Ox, ys_final - Oy)
     idx = int(np.argmax(d))
-    tip_px = (int(xs_final[idx]), int(ys_final[idx]))
-    tip_mm = px_ortho_ke_mm(tip_px, meta)
+    tip_kasar = np.array([xs_final[idx], ys_final[idx]], dtype=float)
+
+    # Lapis 4 (BARU): ARAH bayangan dari garis-fit lewat O, bukan dari satu
+    # piksel terjauh. Piksel terjauh sering jatuh di TEPI bayangan (ujung
+    # miring/penumbra, batas terang-teduh, putus di kotak hitam) sehingga
+    # sudutnya melenceng beberapa derajat. Di sini semua piksel inti bayangan
+    # di sisi ujung (dalam kerucut sekitar arah kasar, > 15 mm dari O agar
+    # alas gnomon tak ikut) dipakai: arah = vektor eigen utama dari
+    # sum(w * r * u u^T), w = kegelapan (anomali), u = vektor satuan dari O.
+    # Dua iterasi: kerucut +-25 deg lalu +-10 deg. Panjang tetap dari
+    # proyeksi titik terjauh ke garis itu.
+    O_vec = np.array([Ox, Oy], dtype=float)
+    arah = (tip_kasar - O_vec) / max(np.linalg.norm(tip_kasar - O_vec), 1e-9)
+    P = np.stack([xs_final - Ox, ys_final - Oy], 1).astype(float)
+    r = np.hypot(P[:, 0], P[:, 1])
+    w_all = anomaly[ys_final, xs_final].astype(float)
+    n_fit = 0
+    for kerucut in (25.0, 10.0):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            U = P / r[:, None]
+        cosang = U @ arah
+        sel = (r > 15 * ppm) & (cosang > math.cos(math.radians(kerucut)))
+        if sel.sum() < 30:
+            break
+        w = w_all[sel] * r[sel]
+        Us = U[sel]
+        M = (Us * w[:, None]).T @ Us
+        val, vec = np.linalg.eigh(M)
+        baru = vec[:, int(np.argmax(val))]
+        if baru @ arah < 0:
+            baru = -baru
+        arah = baru / np.linalg.norm(baru)
+        n_fit = int(sel.sum())
+    panjang = float((tip_kasar - O_vec) @ arah)
+    tip_f = O_vec + arah * panjang
+    tip_px = (int(round(tip_f[0])), int(round(tip_f[1])))
+    tip_mm = px_ortho_ke_mm(tip_f, meta)
+    hasil["n_piksel_fit"] = n_fit
+    hasil["tip_kasar_px"] = (int(tip_kasar[0]), int(tip_kasar[1]))
+    v0 = tip_kasar - O_vec
+    hasil["koreksi_arah_deg"] = math.degrees(
+        math.atan2(arah[1], arah[0]) - math.atan2(v0[1], v0[0]))
 
     hasil.update({
         "tip_mm": tip_mm, "tip_px": tip_px, "yakin": True,
