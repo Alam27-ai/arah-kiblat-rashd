@@ -30,7 +30,7 @@ import cv2
 import numpy as np
 
 # --- HARUS SESUAI PAPAN YANG DICETAK -----------------------------------------
-VERSI_MODUL = "2026-10-05-dms"   # dicek app.py; ganti tiap ubah modul
+VERSI_MODUL = "2026-10-05-sumbu"   # dicek app.py; ganti tiap ubah modul
 SQUARE_MM = 30.0
 MARKER_MM = 22.0
 NX, NY = 6, 7
@@ -578,7 +578,8 @@ AMBANG_TERANG = -0.10        # D di bawah ini = lebih terang dari kertas -> bend
 FRAKSI_TERANG_MAKS = 0.03    # arah dengan >3% piksel terang ditolak
 MIN_MARGIN_SKOR = 0.05       # selisih skor arah terbaik vs arah lain (>20 deg)
 MIN_PISAH_GNOMON_DEG = 20.0  # bayangan & citra gnomon terlalu berimpit -> ulangi
-TOL_PANJANG_EFEMERIS = 0.15  # |L - L_prediksi| / L_prediksi
+TOL_PANJANG_EFEMERIS = 0.15
+MAKS_GESER_O_MM = 1.0      # jarak tegak lurus O ke sumbu bayangan (mm)  # |L - L_prediksi| / L_prediksi
 
 
 def peta_penggelapan(ortho_bgr, meta, board=None, sigma_mm: float = 10.0,
@@ -641,6 +642,100 @@ def peta_penggelapan(ortho_bgr, meta, board=None, sigma_mm: float = 10.0,
     if kembalikan_putih:
         return D, mp
     return D
+
+
+def _sumbu_bayangan(D, meta, O_mm, th_kasar, r_min=10.0, r_maks=55.0,
+                    lebar_cari=8.0, iterasi=4, celah_mm=2.0):
+    """Sumbu bayangan dari garis-fit BEBAS (tidak dipaksa lewat O).
+
+    Diuji pada 8 foto asli 23 Agustus 2026: pada tiga foto pangkal gnomon
+    bergeser ~1,2 mm dari titik O tercetak, sehingga garis yang dipaksa
+    lewat O memiringkan arah ~3 deg. Arah bayangan fisik = arah SUMBU
+    bayangan itu sendiri, tidak bergantung letak pangkal. Langkah:
+    peta penggelapan dihaluskan (sigma 0,5 mm); di tiap jarak sepanjang
+    sumbu sementara dicari titik berat celah gelap melintang (+-8 mm);
+    titik-titik itu di-fit garis berbobot (vektor eigen utama), diulang.
+    Ujung = titik di sumbu tempat celah (pusat +-1 mm dikurangi samping
+    3-6 mm) turun ke setengah tingkat batang (tengah penumbra).
+    Kembalikan dict theta (deg, searah jarum jam dari 'atas' papan),
+    L (proyeksi ujung-O pada sumbu, mm), geser_O_mm (jarak tegak lurus O
+    ke sumbu), tingkat; atau None bila gagal."""
+    ppm, m = meta["px_per_mm"], meta["margin_mm"]
+    O = np.asarray(O_mm, float)
+    kosong = np.isnan(D)
+    s = 0.5 * ppm
+    Ds = cv2.GaussianBlur(np.where(kosong, 0, D).astype(np.float32), (0, 0), s)
+    ws = cv2.GaussianBlur((~kosong).astype(np.float32), (0, 0), s)
+    Dm = np.where(ws > 0.3, Ds / np.maximum(ws, 1e-3), np.nan)
+
+    def ambil(P):
+        xs = np.round((P[..., 0] + m) * ppm).astype(int)
+        ys = np.round((P[..., 1] + m) * ppm).astype(int)
+        ok = (xs >= 0) & (xs < Dm.shape[1]) & (ys >= 0) & (ys < Dm.shape[0])
+        v = np.full(xs.shape, np.nan)
+        v[ok] = Dm[ys[ok], xs[ok]]
+        return v
+
+    t = math.radians(th_kasar)
+    d = np.array([math.sin(t), -math.cos(t)])
+    c0 = O.copy()
+    offs = np.arange(-lebar_cari, lebar_cari + 1e-9, 0.25)
+    for _ in range(iterasi):
+        n = np.array([-d[1], d[0]])
+        base_r = (O - c0) @ d
+        pts, bob = [], []
+        for r in np.arange(r_min, r_maks, 0.5):
+            p0 = c0 + (base_r + r) * d
+            v = ambil(p0[None, :] + offs[:, None] * n[None, :])
+            if np.isnan(v).mean() > 0.5:
+                continue
+            v = np.clip(np.nan_to_num(v - np.nanmedian(v)), 0, None)
+            if v.sum() < 1e-3:
+                continue
+            k = int(np.argmax(np.convolve(v, np.ones(9), "same")))
+            sl = slice(max(k - 8, 0), k + 9)
+            pts.append(p0 + (v[sl] * offs[sl]).sum() / max(v[sl].sum(), 1e-9) * n)
+            bob.append(v[sl].sum())
+        if len(pts) < 10:
+            return None
+        P = np.array(pts)
+        W = np.array(bob) / np.sum(bob)
+        c0 = (P * W[:, None]).sum(0)
+        C = ((P - c0) * W[:, None]).T @ (P - c0)
+        dn = np.linalg.eigh(C)[1][:, -1]
+        d = dn if dn @ d >= 0 else -dn
+        d = d / np.linalg.norm(d)
+
+    n = np.array([-d[1], d[0]])
+    geser = float((O - c0) @ n)
+    base_r = (O - c0) @ d
+    pus = np.abs(offs) <= 1.0
+    sam = (np.abs(offs) >= 3) & (np.abs(offs) <= 6)
+    rs = np.arange(r_min, 400.0, 0.25)
+    celah = np.full(rs.shape, np.nan)
+    for i, r in enumerate(rs):
+        v = ambil((c0 + (base_r + r) * d)[None, :] + offs[:, None] * n[None, :])
+        if np.all(np.isnan(v[pus])) or np.all(np.isnan(v[sam])):
+            continue
+        celah[i] = np.nanmean(v[pus]) - np.nanmedian(v[sam])
+    tingkat = float(np.nanmedian(celah[(rs > r_min + 2) & (rs < r_maks * 0.8)]))
+    if not np.isfinite(tingkat) or tingkat <= 0:
+        return None
+    akhir, bawah = None, 0.0
+    for r, x in zip(rs, celah):
+        if np.isnan(x):
+            continue
+        if x > 0.5 * tingkat:
+            akhir, bawah = r, 0.0
+        else:
+            bawah += 0.25
+            if bawah > celah_mm:
+                break
+    if akhir is None:
+        return None
+    ujung = c0 + (base_r + akhir) * d
+    return {"theta": math.degrees(math.atan2(d[0], -d[1])) % 360,
+            "L": float((ujung - O) @ d), "geser_O_mm": geser, "tingkat": tingkat}
 
 
 def _deteksi_bayangan_template(ortho_bgr, meta, O_mm, L_pred_mm=None,
@@ -743,6 +838,13 @@ def _deteksi_bayangan_template(ortho_bgr, meta, O_mm, L_pred_mm=None,
         hasil["flags"].append("ujung bayangan tidak ditemukan")
         return hasil
 
+    # 4) sumbu bebas (lihat _sumbu_bayangan): arah = sumbu bayangan itu sendiri,
+    #    panjang = proyeksi ujung-O; menggantikan hasil 2)-3) bila berhasil.
+    geser_O = None
+    sb = _sumbu_bayangan(D, meta, O, th, r_maks=max(20.0, min(0.8 * akhir, 60.0)))
+    if sb is not None:
+        th, akhir, geser_O = sb["theta"], sb["L"], sb["geser_O_mm"]
+        u = satuan(th)
     B = O + akhir * u
     if geo is not None:
         arah_gnomon = geo[0]
@@ -759,6 +861,9 @@ def _deteksi_bayangan_template(ortho_bgr, meta, O_mm, L_pred_mm=None,
             and pisah < MIN_PISAH_GNOMON_DEG + (geo[1] if geo is not None else 0):
         peringatan.append("bayangan berdekatan dengan citra gnomon — periksa titik, "
                           "atau potret lebih tegak dari atas")
+    if geser_O is not None and abs(geser_O) > MAKS_GESER_O_MM:
+        peringatan.append(f"sumbu bayangan meleset {abs(geser_O):.1f} mm dari titik O — "
+                          "pangkal gnomon tidak tepat di O atau gnomon miring; periksa pemasangan")
     if L_pred_mm and abs(akhir - L_pred_mm) / L_pred_mm > TOL_PANJANG_EFEMERIS:
         peringatan.append(f"panjang bayangan {akhir:.1f} mm vs prediksi efemeris {L_pred_mm:.1f} mm")
 
@@ -768,7 +873,7 @@ def _deteksi_bayangan_template(ortho_bgr, meta, O_mm, L_pred_mm=None,
         "yakin": not hasil["flags"], "theta_bayangan_deg": th, "panjang_mm": akhir,
         "tingkat_gelap": tingkat, "margin_skor": margin,
         "arah_gnomon_deg": arah_gnomon, "pisah_gnomon_deg": pisah,
-        "peringatan": peringatan,
+        "peringatan": peringatan, "geser_O_mm": geser_O,
     })
     return hasil
 
