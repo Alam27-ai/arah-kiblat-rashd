@@ -944,8 +944,12 @@ def baca_exif_foto(raw_bytes: bytes) -> dict:
                     lat = -lat
                 if lon_ref in ("W", b"W"):
                     lon = -lon
-                hasil["lat"] = lat
-                hasil["lon"] = lon
+                # GPS tanpa fix sering tersimpan 0/0 -> NaN; abaikan bila tak valid
+                if (math.isfinite(lat) and math.isfinite(lon)
+                        and abs(lat) <= 90 and abs(lon) <= 180
+                        and not (lat == 0 and lon == 0)):
+                    hasil["lat"] = lat
+                    hasil["lon"] = lon
     except Exception:
         pass
 
@@ -1012,7 +1016,12 @@ def _terapkan_exif_pending_lokasi():
     if not info:
         return
     if "lat" in info and "lon" in info:
-        _set_coord_state(info["lat"], info["lon"])
+        try:
+            lat, lon = float(info["lat"]), float(info["lon"])
+            if math.isfinite(lat) and math.isfinite(lon):
+                _set_coord_state(lat, lon)
+        except (TypeError, ValueError):
+            pass
     if "tanggal" in info:
         st.session_state["the_date"] = info["tanggal"]
 
