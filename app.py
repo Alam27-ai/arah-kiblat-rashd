@@ -40,7 +40,7 @@ import papan_charuco as pc
 import importlib as _importlib
 # Streamlit Cloud tidak selalu memuat ulang modul lokal setelah git push;
 # paksa reload bila versi modul di memori tidak sama dengan yang diharapkan.
-if getattr(pc, "VERSI_MODUL", None) != "2026-10-04-template":
+if getattr(pc, "VERSI_MODUL", None) != "2026-10-04-template-geo":
     pc = _importlib.reload(pc)
 import qibla_core as qc
 
