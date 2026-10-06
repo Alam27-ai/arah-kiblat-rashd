@@ -1374,34 +1374,61 @@ def render_ukur_foto(inp, ref):
             st.metric("Garis terpasang meleset dari Kiblat",
                      f"{qc.decimal_to_dms(abs(selisih_ref), 'alt')} — putar ke {arah_koreksi}")
 
-    # --- 7. Simpan & log ---
+    # --- 7. Log pengukuran ---
+    # Setiap hasil yang tampil OTOMATIS masuk ke log sesi (disimpan di
+    # session_state, bukan hanya di file server — di Streamlit Cloud file
+    # server bersifat sementara dan tidak bisa diambil pengguna). Pengguna
+    # mengunduh log sesi sebagai CSV; file server tetap ditulis sebagai cadangan.
     st.divider()
-    catatan = st.text_input("Catatan (opsional)", "")
-    if st.button("💾 Simpan pengukuran ini ke log", type="primary"):
-        _catat_log_ukur({
-            "waktu_dicatat": dt.datetime.now(tz).isoformat(timespec="seconds"),
-            "nama_file": unggahan.name,
-            "lat": f"{inp['lat']:.6f}", "lon": f"{inp['lon']:.6f}",
-            "waktu_potret": dt_local.isoformat(timespec="seconds"),
-            "tinggi_gnomon_m": f"{tinggi_gnomon:.3f}",
-            "kotak_mm": f"{kotak_mm:.2f}",
-            "panjang_bayangan_mm": f"{hasil['panjang_bayangan_mm']:.1f}",
-            "delta_a_target_deg": f"{sol.delta_a:.3f}",
-            "arah": arah,
-            "altitude_efemeris_deg": f"{sol.sun_altitude:.3f}",
-            "altitude_terukur_deg": f"{hasil['altitude_terukur_deg']:.3f}",
-            "selisih_altitude_deg": f"{hasil['selisih_altitude_deg']:.3f}",
-            "validasi_altitude_ok": hasil["validasi_altitude_ok"],
-            "vonis_mutu_foto": vonis,
-            "bias_mutu_deg": f"{hasil_mutu.get('bias_deg', float('nan')):.3f}"
-                            if "bias_deg" in hasil_mutu else "",
-            "sisi_potong_tepi": potong.get("sisi") or "",
-            "posisi_potong_cm": potong.get("posisi_cm_str", ""),
-            "selisih_referensi_deg": (f"{selisih_ref:.3f}"
-                                      if selisih_ref is not None else ""),
-            "catatan": catatan,
-        })
-        st.success(f"Tersimpan ke {LOG_UKUR_CV}")
+    st.subheader("🗒️ Log pengukuran")
+    catatan = st.text_input("Catatan (opsional)", "", key="ukur_catatan")
+    baris = {
+        "waktu_dicatat": dt.datetime.now(tz).isoformat(timespec="seconds"),
+        "nama_file": unggahan.name,
+        "lat": f"{inp['lat']:.6f}", "lon": f"{inp['lon']:.6f}",
+        "waktu_potret": dt_local.isoformat(timespec="seconds"),
+        "tinggi_gnomon_m": f"{tinggi_gnomon:.3f}",
+        "kotak_mm": f"{kotak_mm:.2f}",
+        "panjang_bayangan_mm": f"{hasil['panjang_bayangan_mm']:.1f}",
+        "delta_a_target_deg": f"{sol.delta_a:.4f}",
+        "arah": arah,
+        "altitude_efemeris_deg": f"{sol.sun_altitude:.3f}",
+        "altitude_terukur_deg": f"{hasil['altitude_terukur_deg']:.3f}",
+        "selisih_altitude_deg": f"{hasil['selisih_altitude_deg']:.3f}",
+        "validasi_altitude_ok": hasil["validasi_altitude_ok"],
+        "vonis_mutu_foto": vonis,
+        "bias_mutu_deg": f"{hasil_mutu.get('bias_deg', float('nan')):.3f}"
+                        if "bias_deg" in hasil_mutu else "",
+        "sisi_potong_tepi": potong.get("sisi") or "",
+        "posisi_potong_cm": potong.get("posisi_cm_str", ""),
+        "selisih_referensi_deg": (f"{selisih_ref:.3f}"
+                                  if selisih_ref is not None else ""),
+        "catatan": catatan,
+    }
+    kunci = (unggahan.name, dt_local.isoformat(timespec="seconds"),
+             tuple(np.round(B_px, 1)))
+    log_sesi = st.session_state.setdefault("log_sesi", {})
+    baru = kunci not in log_sesi
+    if not baru:
+        baris["waktu_dicatat"] = log_sesi[kunci]["waktu_dicatat"]
+    log_sesi[kunci] = baris            # catatan/selisih referensi ikut diperbarui
+    if baru:
+        try:
+            _catat_log_ukur(baris)     # cadangan di server (bisa hilang saat restart)
+        except OSError:
+            pass
+
+    df_log = pd.DataFrame(list(log_sesi.values()), columns=LOG_UKUR_CV_HEADER)
+    st.caption(f"Tercatat otomatis: {len(df_log)} pengukuran di sesi ini. "
+               "Unduh sebelum menutup halaman — log sesi hilang bila halaman ditutup.")
+    st.dataframe(df_log[["waktu_potret", "delta_a_target_deg", "arah",
+                         "sisi_potong_tepi", "posisi_potong_cm", "vonis_mutu_foto"]],
+                 hide_index=True, width="stretch")
+    st.download_button(
+        "⬇️ Unduh log sesi (CSV)",
+        df_log.to_csv(index=False).encode("utf-8"),
+        file_name=f"BayangKiblat_log_{dt.datetime.now(tz):%Y%m%d_%H%M}.csv",
+        mime="text/csv", type="primary")
 
     if st.button("🔁 Ukur foto lain / ulangi penandaan"):
         _reset_klik()
